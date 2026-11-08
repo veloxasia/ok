@@ -5,7 +5,7 @@
 // pathfinding, edge-sliding, or block placement or serving stale candidate caches after block updates.
 
 const { Vec3 } = require('../util/vec3')
-const { isAirLike, feetCellOf } = require('../world/ground')
+const { isAirLike, feetCellOf, supportUnder } = require('../world/ground')
 
 class LookaheadEngine {
   constructor ({ bot, world, config, logger, planner, placer, aim, nav, ground, getPlanner, getPlacer, getNavigation, getGround }) {
@@ -69,19 +69,14 @@ class LookaheadEngine {
     const under = this.world.blockAt(new Vec3(fc.x, fc.y - 1, fc.z))
     const here = this.world.blockAt(new Vec3(fc.x, fc.y, fc.z))
     const activeEdgeAim = Boolean(placer?.scaffold?._sliding) || ['edge slide', 'aiming', 'placing', 'click + server answer'].includes(placer?.phase || '')
-    const floatingOverAir = !activeEdgeAim && !e.isInWater && !e.isInLava && isAirLike(under) && isAirLike(here) && Math.abs(e.velocity?.y ?? 0) < 0.05
+    const sup = supportUnder(this.world, e.position, 0.16)
+    const floatingOverAir = !activeEdgeAim && !sup.supported && !e.isInWater && !e.isInLava && isAirLike(under) && isAirLike(here) && Math.abs(e.velocity?.y ?? 0) < 0.05
     if (floatingOverAir) {
       if (!this._airHoverSince) this._airHoverSince = Date.now()
-      else if (Date.now() - this._airHoverSince >= 250) {
+      else if (Date.now() - this._airHoverSince >= 350) {
         if (bot.getControlState?.('sneak')) {
           if (placer) placer._chestSneak = false
           bot.setControlState('sneak', false)
-        }
-        const dxC = (fc.x + 0.5) - e.position.x
-        const dzC = (fc.z + 0.5) - e.position.z
-        if (Math.hypot(dxC, dzC) > 0.04) {
-          e.position.x += dxC * 0.55
-          e.position.z += dzC * 0.55
         }
         e.onGround = false
         if (e.velocity && e.velocity.y >= -0.02) e.velocity.y = -0.08

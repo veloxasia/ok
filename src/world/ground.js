@@ -53,6 +53,9 @@ function shapesOf (block) {
     if (p.type === 'bottom') return [[0, 0, 0, 1, 0.5, 1]]
     if (p.type === 'top') return [[0, 0.5, 0, 1, 1, 1]]
   }
+  if (/_stairs$/.test(block.name || '')) {
+    return [[0, 0, 0, 1, 0.5, 1], [0, 0.5, 0, 1, 1, 1]]
+  }
   return block.boundingBox === 'block' ? [[0, 0, 0, 1, 1, 1]] : []
 }
 
@@ -154,25 +157,22 @@ class GroundMonitor {
     if (!e?.position) return
     this.samples.push({ t: Date.now(), y: e.position.y, x: e.position.x, z: e.position.z, vy: e.velocity?.y ?? 0, onGround: Boolean(e.onGround) })
     if (this.samples.length > 60) this.samples.shift()
-    if (!e.isInWater && !e.isInLava && this.stillFor(250)) {
+    if (!e.isInWater && !e.isInLava && this.stillFor(350)) {
       const fc = feetCellOf(this.world, e.position)
       const under = this.world.blockAt({ x: fc.x, y: fc.y - 1, z: fc.z })
       const atFeet = this.world.blockAt({ x: fc.x, y: fc.y, z: fc.z })
       const centerAir = isAirLike(under) && isAirLike(atFeet)
       const activeEdgeAim = Boolean(this.bot.builder?.scaffold?._sliding) || ['edge slide', 'aiming', 'placing', 'click + server answer'].includes(this.bot.builder?.placer?.phase || '')
       if (centerAir && !activeEdgeAim) {
-        if (this.bot.getControlState?.('sneak')) {
-          if (this.bot.builder?.placer) this.bot.builder.placer._chestSneak = false
-          try { this.bot.setControlState('sneak', false) } catch {}
+        const sup = supportUnder(this.world, e.position, 0.16)
+        if (!sup.supported) {
+          if (this.bot.getControlState?.('sneak')) {
+            if (this.bot.builder?.placer) this.bot.builder.placer._chestSneak = false
+            try { this.bot.setControlState('sneak', false) } catch {}
+          }
+          e.onGround = false
+          if (e.velocity && e.velocity.y >= -0.02) e.velocity.y = -0.08
         }
-        const dxC = (fc.x + 0.5) - e.position.x
-        const dzC = (fc.z + 0.5) - e.position.z
-        if (Math.hypot(dxC, dzC) > 0.04) {
-          e.position.x += dxC * 0.55
-          e.position.z += dzC * 0.55
-        }
-        e.onGround = false
-        if (e.velocity && e.velocity.y >= -0.02) e.velocity.y = -0.08
       }
     }
   }
@@ -234,21 +234,14 @@ class GroundMonitor {
     }
     const underAir = isAirLike(this.world.blockAt({ x: fc.x, y: fc.y - 1, z: fc.z })) && isAirLike(this.world.blockAt(fc))
     const activeEdgeAim = Boolean(this.bot.builder?.scaffold?._sliding) || ['edge slide', 'aiming', 'placing', 'click + server answer'].includes(this.bot.builder?.placer?.phase || '')
-    if (underAir && !activeEdgeAim && this.stillFor(250)) {
+    if (underAir && !support.supported && !activeEdgeAim && this.stillFor(350)) {
       if (this.bot.getControlState?.('sneak')) {
         if (this.bot.builder?.placer) this.bot.builder.placer._chestSneak = false
         try { this.bot.setControlState('sneak', false) } catch {}
       }
-      const dxC = (fc.x + 0.5) - e.position.x
-      const dzC = (fc.z + 0.5) - e.position.z
-      if (Math.hypot(dxC, dzC) > 0.04) {
-        e.position.x += dxC * 0.55
-        e.position.z += dzC * 0.55
-      }
       e.onGround = false
     }
-    const supportAfter = (underAir && !activeEdgeAim && this.stillFor(250)) ? supportUnder(this.world, e.position, 0.12) : support
-    if ((e.onGround && !underAir) || (supportAfter.supported && Math.abs(vy) < 0.1 && !(underAir && !activeEdgeAim && this.stillFor(250)))) return 'grounded'
+    if ((e.onGround && (!underAir || support.supported)) || (support.supported && Math.abs(vy) < 0.1)) return 'grounded'
     if (underAir && !support.supported) {
       if (this.bot.getControlState?.('sneak') && !this.bot.builder?.scaffold?._sliding) {
         if (this.bot.builder?.placer) this.bot.builder.placer._chestSneak = false

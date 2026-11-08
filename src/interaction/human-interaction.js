@@ -176,7 +176,7 @@ class HumanInteractionEngine {
 
   async quick (promise) {
     promise.catch(() => {})
-    await Promise.race([promise, sleep(65)])
+    await Promise.race([promise, sleep(15)])
   }
 
   async sendUse (block, face, cursor) {

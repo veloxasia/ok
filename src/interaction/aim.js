@@ -122,6 +122,9 @@ function boxOf (block) {
   }
   const n = block?.name || ''
   const p = block?.getProperties?.() || block?.properties || {}
+  if (/(^|_)torch$/.test(n) && !/wall_torch$/.test(n)) {
+    return [0.375, 0, 0.375, 0.625, 0.625, 0.625]
+  }
   if (/_slab$/.test(n)) {
     if (p.type === 'bottom') return [0, 0, 0, 1, 0.5, 1]
     if (p.type === 'top') return [0, 0.5, 0, 1, 1, 1]
@@ -370,7 +373,7 @@ class AimSolver {
 
   isSolidRef (block, faceName = null) {
     if (!block || isAirLike(block)) return false
-    if (block.boundingBox !== 'block' && !/_door$|_trapdoor$|_fence_gate$/.test(block.name || '')) return false
+    if (block.boundingBox !== 'block' && !/_door$|_trapdoor$|_fence_gate$|(^|_)torch$/.test(block.name || '')) return false
     if (/^(repeater|comparator|daylight_detector)$|_carpet$/.test(block.name || '')) return false
     if (faceName && /_slab$/.test(block.name)) {
       const p = block.getProperties?.() || block.properties || {}
@@ -546,17 +549,21 @@ class AimSolver {
   }
 
   rayOutlineBlocker (eye, dir, maxDist, refPos, ignorePos = null) {
-    const step = 0.04
-    const seen = new Set([`${refPos.x},${refPos.y},${refPos.z}`])
-    if (ignorePos) seen.add(`${ignorePos.x},${ignorePos.y},${ignorePos.z}`)
+    const step = 0.08
+    const rx = refPos.x; const ry = refPos.y; const rz = refPos.z
+    const ix = ignorePos ? ignorePos.x : -999999
+    const iy = ignorePos ? ignorePos.y : -999999
+    const iz = ignorePos ? ignorePos.z : -999999
+    let pbx = -999999; let pby = -999999; let pbz = -999999
     let best = null
-    for (let t = 0.04; t < maxDist - 0.02; t += step) {
+    for (let t = 0.05; t < maxDist - 0.02; t += step) {
       const bx = Math.floor(eye.x + dir.x * t)
       const by = Math.floor(eye.y + dir.y * t)
       const bz = Math.floor(eye.z + dir.z * t)
-      const ck = `${bx},${by},${bz}`
-      if (seen.has(ck)) continue
-      seen.add(ck)
+      if (bx === pbx && by === pby && bz === pbz) continue
+      pbx = bx; pby = by; pbz = bz
+      if (bx === rx && by === ry && bz === rz) continue
+      if (bx === ix && by === iy && bz === iz) continue
       const b = this.world.blockAt(new Vec3(bx, by, bz))
       if (!b || isAirLike(b) || b.name === 'water' || b.name === 'lava' || b.name === 'bubble_column') continue
       const pos = new Vec3(bx, by, bz)
@@ -665,7 +672,8 @@ class AimSolver {
       }
     }
     if (!stageResults.length && opts.allowScaffold !== false && (opts.allowScaffold || opts.onlyScaffold)) {
-      const out = this.search(target, spec, origin, { r: 5, down: 12, up: 4, aroundTarget: true }, cache, opts, true).filter(c => !opts.exclude?.has(key(c.stand)))
+      let out = spec.look === 'up' ? this.search(target, spec, origin, { r: 3, down: 5, up: 0, aroundTarget: true }, cache, opts, true).filter(c => !opts.exclude?.has(key(c.stand))) : []
+      if (!out.length) out = this.search(target, spec, origin, { r: 5, down: 12, up: 4, aroundTarget: true }, cache, opts, true).filter(c => !opts.exclude?.has(key(c.stand)))
       stageResults.push(...out)
     }
     stageResults.sort((a, b) => a.cost - b.cost)
@@ -720,6 +728,7 @@ class AimSolver {
           for (let dz = -R; dz <= R; dz++) {
             const S = new Vec3(cx + dx, (st.aroundTarget ? cy : origin.y) + dy, cz + dz)
             if (S.y < minStandY) continue
+            if (spec.look === 'up' && S.y >= target.y) continue
             if (!self && this.isAimBlacklisted(target, faceOpt.f, S)) continue
             if (opts.fixedStand && !(S.x === opts.fixedStand.x && S.y === opts.fixedStand.y && S.z === opts.fixedStand.z)) continue
             const effMinDist = (opts.bucket && S.y >= target.y + 1 && opts.minStandDist <= 1.6) ? 0.95 : opts.minStandDist

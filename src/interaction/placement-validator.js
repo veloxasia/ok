@@ -113,7 +113,7 @@ function validatePlacement (target, state = {}, aim = null, support = {}, reach 
       reason: `reference block ${refPos.x},${refPos.y},${refPos.z} is not adjacent to target ${target.x},${target.y},${target.z} (dist=${manhattan})`
     }
   }
-  if (!refBlock || isAirLike(refBlock) || refBlock.boundingBox !== 'block' || /^(water|lava)$/.test(refBlock.name || '')) {
+  if (!refBlock || isAirLike(refBlock) || (refBlock.boundingBox !== 'block' && !/_door$|_trapdoor$|_fence_gate$|(^|_)torch$/.test(refBlock.name || '')) || /^(water|lava)$/.test(refBlock.name || '')) {
     return {
       valid: false,
       code: 'NO_SUPPORT',

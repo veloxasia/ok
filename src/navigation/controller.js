@@ -81,7 +81,7 @@ class NavigationController {
     m.allow1by1towers = false
     m.exclusionAreasStep.push(b => (this.holeCost && b && b.position && this.holeCost(b.position.x, b.position.z, b.position.y)) || 0)
     m.allowFreeMotion = false
-    m.allowParkour = Boolean(this.config.navigation?.parkour !== false)
+    m.allowParkour = false
     m.allowSprinting = true
     m.allowEntityDetection = false
     // Allow 3-block drops on dry land (3-block drops deal 0 fall damage in Minecraft, avoiding pointless ender pearls!)
@@ -111,7 +111,7 @@ class NavigationController {
     m.canDig = false
     m.allow1by1towers = false
     m.allowFreeMotion = false
-    m.allowParkour = Boolean(this.config.navigation?.parkour !== false)
+    m.allowParkour = false
     m.allowSprinting = true
     m.allowEntityDetection = false
     m.maxDropDown = Number(this.config.navigation?.accessMaxDrop ?? 3)
@@ -461,47 +461,58 @@ class NavigationController {
 
   async unstick () {
     const bot = this.bot
-    bot.clearControlStates()
-    try { await this.doorAssist(true) } catch {}
     const e = bot.entity
-    if (!e) return
+    if (!e?.position) return
+    const nearHazard = Boolean(bot.builder?.fallGuard?.hazardAt?.(e.position.x, e.position.y, e.position.z, 2))
+    const keepSneak = nearHazard || Boolean(bot.getControlState?.('sneak'))
+    for (const k of ['forward', 'back', 'left', 'right', 'jump', 'sprint']) {
+      try { bot.setControlState(k, false) } catch {}
+    }
+    if (keepSneak) {
+      try { bot.setControlState('sneak', true) } catch {}
+    }
+    try { await this.doorAssist(true) } catch {}
+    const fy0 = Math.floor(e.position.y + 0.01)
+    const bFeet = bot.blockAt(new Vec3(Math.floor(e.position.x), fy0, Math.floor(e.position.z)))
+    const bBelow = bot.blockAt(new Vec3(Math.floor(e.position.x), fy0 - 1, Math.floor(e.position.z)))
+    const onStairs = Boolean((bFeet && /_stairs$/.test(bFeet.name || '')) || (bBelow && /_stairs$/.test(bBelow.name || '')))
     const ahead = bot.blockAt(e.position.offset(-Math.sin(e.yaw) * 0.9, 0.2, -Math.cos(e.yaw) * 0.9))
     const tall = ahead && /(fence|_wall$|_gate$|door)/.test(ahead.name)
     const safeDir = (keys) => {
+      if (keys.includes('jump') && (nearHazard || onStairs)) return false
       const fwd = (keys.includes('forward') ? 1 : 0) - (keys.includes('back') ? 1 : 0)
       const str = (keys.includes('left') ? 1 : 0) - (keys.includes('right') ? 1 : 0)
-      if (!fwd && !str) return true
+      if (!fwd && !str) return !nearHazard && !onStairs
       const ux = fwd * -Math.sin(e.yaw) + str * -Math.cos(e.yaw)
       const uz = fwd * -Math.cos(e.yaw) + str * Math.sin(e.yaw)
       const fy = Math.floor(e.position.y + 0.01)
-      for (const d of [0.5, 0.95]) {
+      for (const d of [0.35, 0.65, 0.95]) {
         const fx = Math.floor(e.position.x + ux * d); const fz = Math.floor(e.position.z + uz * d)
-        let hasFloor = false
-        for (let k = 1; k <= 2; k++) {
-          const b = bot.blockAt(new Vec3(fx, fy - k, fz))
-          if (b && /^(hopper|cauldron|composter|lava|fire|soul_fire)$/.test(b.name)) return false
-          if (b && b.boundingBox === 'block') { hasFloor = true; break }
-        }
+        const b0 = bot.blockAt(new Vec3(fx, fy, fz))
+        const b1 = bot.blockAt(new Vec3(fx, fy - 1, fz))
+        const hasFloor = Boolean(
+          (b0 && /(_stairs|_slab)$/.test(b0.name || '')) ||
+          (b1 && b1.boundingBox === 'block' && !/^(hopper|cauldron|composter|lava|fire|soul_fire|water)$/.test(b1.name || ''))
+        )
         if (!hasFloor) return false
-        for (const dy of [0, -1, -2]) {
+        for (const dy of [0, 1]) {
           const b = bot.blockAt(new Vec3(fx, fy + dy, fz))
           if (b && /^(lava|fire|soul_fire|magma_block|cactus|sweet_berry_bush|water)$/.test(b.name)) return false
         }
       }
       return true
     }
-    const moves = [['jump'], ['back'], ['left'], ['right'], ['forward', 'jump']]
+    const moves = [['back'], ['left'], ['right']]
       .filter(m => !(tall && m.includes('forward')) && safeDir(m))
     const order = moves.sort(() => Math.random() - 0.5)
-    for (const keys of order.slice(0, 3)) {
+    for (const keys of order.slice(0, 2)) {
       checkAbort()
       if (!safeDir(keys)) continue
       for (const k of keys) bot.setControlState(k, true)
-      await sleep(220 + Math.random() * 140)
+      await sleep(140)
       for (const k of keys) bot.setControlState(k, false)
-      await sleep(60)
+      await sleep(50)
     }
-    bot.clearControlStates()
   }
 
   buildPlaceGoal (targetPos, face, properties = {}) {

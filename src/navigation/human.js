@@ -84,7 +84,7 @@ function createHuman (bot, opts = {}) {
     const m = new Movements(bot)
     m.canDig = false
     m.allow1by1towers = false
-    m.allowParkour = true
+    m.allowParkour = false
     m.allowSprinting = true
     m.allowEntityDetection = false
     m.scafoldingBlocks = []
@@ -191,7 +191,7 @@ function createHuman (bot, opts = {}) {
     if (live && !live()) return null
     const gyFloor = Math.floor(goal.y)
     const goalBlockHere = bot.blockAt(new Vec3(Math.floor(goal.x), gyFloor, Math.floor(goal.z)))
-    const allowYPlus1 = (goal.y - gyFloor) > 0.05 || isBottomSlabBlock(goalBlockHere) || isLowFloorBlock(goalBlockHere)
+    const allowYPlus1 = (goal.y - gyFloor) > 0.05 || isBottomSlabBlock(goalBlockHere) || isLowFloorBlock(goalBlockHere) || isStairBlock(goalBlockHere)
     const goalNode = new GoalBlock(Math.floor(goal.x), gyFloor, Math.floor(goal.z), allowYPlus1)
     const dist = bot.entity?.position ? horiz(goal.minus(bot.entity.position)) : 32
     const maxTimeout = dist <= 18 ? 360 : dist <= 32 ? 540 : 750
@@ -257,6 +257,7 @@ function createHuman (bot, opts = {}) {
 
   const doorLike = b => Boolean(b && /(_door|_fence_gate)$/.test(b.name) && !b.name.startsWith('iron_'))
   const isBottomSlabBlock = b => Boolean(b && /_slab$/.test(b.name || '') && (b.getProperties?.()?.type || b.properties?.type) === 'bottom')
+  const isStairBlock = b => Boolean(b && /_stairs$/.test(b.name || ''))
   const isLowFloorBlock = b => Boolean(b && (/^(repeater|comparator|daylight_detector)$|_carpet$|^snow$/.test(b.name || '') || (/_trapdoor$/.test(b.name || '') && !b.name.startsWith('iron_') && (b.getProperties?.()?.half || b.properties?.half) !== 'top' && String(b.getProperties?.()?.open ?? b.properties?.open) !== 'true')))
   const trapFloor = b => {
     if (!b) return false
@@ -289,7 +290,7 @@ function createHuman (bot, opts = {}) {
     if (!b) return false
     const props = b.getProperties?.() || b.properties || {}
     if (props.waterlogged === true || props.waterlogged === 'true') return false
-    if (allowBottomSlab && (isBottomSlabBlock(b) || /^(repeater|comparator|daylight_detector)$|_carpet$/.test(b.name || ''))) return true
+    if (allowBottomSlab && (isBottomSlabBlock(b) || isStairBlock(b) || /^(repeater|comparator|daylight_detector)$|_carpet$/.test(b.name || ''))) return true
     return (b.boundingBox === 'empty' || doorLike(b)) && !/^(water|lava|fire|soul_fire|bubble_column)$/.test(b.name)
   }
 
@@ -311,7 +312,7 @@ function createHuman (bot, opts = {}) {
         const isCenter = ox === 0 && oz === 0
         const p = new Vec3(cx + ox, a.y, cz + oz)
         const feetB = bot.blockAt(p)
-        const onBotSlab = (isBottomSlabBlock(feetB) || isLowFloorBlock(feetB)) && !inPit(p)
+        const onBotSlab = (isBottomSlabBlock(feetB) || isLowFloorBlock(feetB) || isStairBlock(feetB)) && !inPit(p)
         const floorOk = onBotSlab || (solid(p.offset(0, -1, 0)) && !inPit(p))
         if (floorOk) anyFloor = true
         if (s >= 1 && !floorOk) return false
@@ -345,9 +346,10 @@ function createHuman (bot, opts = {}) {
         const z = cz + oz
         const bl0 = bot.blockAt(new Vec3(x, y, z))
         const bl1 = bot.blockAt(new Vec3(x, y + 1, z))
-        const botSlab0 = isBottomSlabBlock(bl0) || isLowFloorBlock(bl0)
+        const botSlab0 = isBottomSlabBlock(bl0) || isLowFloorBlock(bl0) || isStairBlock(bl0)
+        const stairStep1 = isStairBlock(bl1) && b.y > a.y - 0.1
         if (bl0 && ((bl0.boundingBox === 'block' && !doorLike(bl0) && !botSlab0) || /^(water|lava|fire|soul_fire)$/.test(bl0.name))) return false
-        if (bl1 && ((bl1.boundingBox === 'block' && !doorLike(bl1)) || /^(water|lava|fire|soul_fire)$/.test(bl1.name))) return false
+        if (bl1 && ((bl1.boundingBox === 'block' && !doorLike(bl1) && !stairStep1) || /^(water|lava|fire|soul_fire)$/.test(bl1.name))) return false
         if (allowGapHop) continue
         if (isCenter && s > 2 && inPit(new Vec3(x, y, z))) return false
         let hasFloor = botSlab0 && !inPit(new Vec3(x, y, z))
@@ -675,13 +677,7 @@ function createHuman (bot, opts = {}) {
     const wpDist = curWp ? horiz(curWp.minus(pos)) : remaining
     const nextUp = Boolean(curWp && curWp.y > pos.y + 0.45 && wpDist < 1.55)
     const fyNow = Math.floor(pos.y + 0.01)
-    const isParkourHop = Boolean(
-      !inWater && curWp && segDist >= 1.80 && Math.abs(curWp.y - pos.y) <= 0.6 && wpDist >= 1.15 && wpDist <= 3.6 &&
-      solid(new Vec3(Math.floor(curWp.x), Math.floor(curWp.y + 0.01) - 1, Math.floor(curWp.z))) &&
-      clearLine(pos, curWp, true) &&
-      (!solid(new Vec3(Math.floor(pos.x - Math.sin(wantYaw) * 0.65), fyNow - 1, Math.floor(pos.z - Math.cos(wantYaw) * 0.65))) ||
-       !solid(new Vec3(Math.floor(pos.x - Math.sin(wantYaw) * 1.05), fyNow - 1, Math.floor(pos.z - Math.cos(wantYaw) * 1.05))))
-    )
+    const isParkourHop = false
     const spatial = spatialNow
     const isNarrow = spatial.mode === 'narrow'
     const checkRayDrop = (ux, uz, maxD) => {
@@ -692,7 +688,7 @@ function createHuman (bot, opts = {}) {
         const fx = Math.floor(pos.x + ux * d); const fz = Math.floor(pos.z + uz * d)
         const b0 = bot.blockAt(new Vec3(fx, fy, fz))
         if (b0 && /^(water|lava|fire|soul_fire)$/.test(b0.name)) return true
-        if (b0 && isBottomSlabBlock(b0)) continue
+        if (b0 && (isBottomSlabBlock(b0) || isStairBlock(b0))) continue
         const b1 = bot.blockAt(new Vec3(fx, fy - 1, fz))
         if (!b1) continue
         if (trapFloor(b1)) return true
@@ -741,9 +737,10 @@ function createHuman (bot, opts = {}) {
       }
     }
 
-    // Only engage sneak during walking when overhanging a real hazard (>3 block drop or lava/pit), never during normal deck walking or a parkour hop!
-    const needSneakGuard = !inWater && !onClimbable && bot.entity.onGround && !nextUp && !isParkourHop &&
-      Boolean((spatial.overhanging || (isNarrow && (nearEdge || aerr > 18 * DEG))) && bot.builder?.fallGuard?.hazardAt?.(pos.x, pos.y, pos.z, 3))
+    const onStairsNow = Boolean(isStairBlock(feetBlock0) || isStairBlock(belowFeetBlock0))
+    // Engage sneak during walking when overhanging or on a narrow 1-block strip near a real drop (>=2 blocks)
+    const needSneakGuard = !inWater && !onClimbable && !onStairsNow && bot.entity.onGround && !nextUp &&
+      Boolean((spatial.overhanging || (isNarrow && (nearEdge || aerr > 12 * DEG || spatial.safeNeighbors <= 2))) && bot.builder?.fallGuard?.hazardAt?.(pos.x, pos.y, pos.z, 2))
     if (needSneakGuard) {
       bot.setControlState('sneak', true)
       w.sneakGuard = true
@@ -768,16 +765,14 @@ function createHuman (bot, opts = {}) {
         w.lastSwimY = pos.y
         w.lastProgressAt = now
       }
-    } else if (bot.entity.onGround && jumpHeld === 0) {
-      if (nextUp && lowStepAhead(pos, wantYaw, curWp)) {
-        jump()
-      } else if (isParkourHop && aerr < 28 * DEG && !solid(new Vec3(Math.floor(pos.x - Math.sin(wantYaw) * 0.48), fyNow - 1, Math.floor(pos.z - Math.cos(wantYaw) * 0.48)))) {
+    } else if (bot.entity.onGround && jumpHeld === 0 && !onStairsNow) {
+      if (nextUp && lowStepAhead(pos, wantYaw, curWp, false)) {
         jump()
       }
     }
 
     // ---- collision / stale-route handling (anti-wall-jump) ----
-    if (bot.entity.onGround && !w.replanning && now - w.checkedAt > 120) {
+    if (bot.entity.onGround && !w.replanning && !onStairsNow && now - w.checkedAt > 120) {
       w.checkedAt = now
       const tgt = w.route[Math.min(w.idx, w.route.length - 1)]
       if (tgt && Math.abs(tgt.y - pos.y) < 0.6 && horiz(tgt.minus(pos)) < 4 && !clearLine(pos, tgt, isParkourHop)) {
@@ -797,13 +792,13 @@ function createHuman (bot, opts = {}) {
       w.blockedAt = now
       w.blockedStep++
       // Always check if there is a 1-block climbable step ahead BEFORE marking the cell bad!
-      if (w.blockedStep <= 3 && lowStepAhead(pos, wantYaw, curWp)) { jump(); return }
+      if (w.blockedStep <= 3 && lowStepAhead(pos, wantYaw, curWp, true)) { jump(); return }
       markBad(pos, curWp)
       if (w.blockedStep >= 3) { failWalk(w, new Error('stuck at wall')); return }
       startReplan(w, 'hit a block in front')
       return
     }
-    if (now - w.lastProgressAt > 750 && now - stuckJumpAt > 650 && bot.entity.onGround && lowStepAhead(pos, wantYaw, curWp)) {
+    if (now - w.lastProgressAt > 750 && now - stuckJumpAt > 650 && bot.entity.onGround && lowStepAhead(pos, wantYaw, curWp, true)) {
       stuckJumpAt = now
       jump()
     }
@@ -850,12 +845,15 @@ function createHuman (bot, opts = {}) {
     }
   }
 
-  function lowStepAhead (pos, wantYawArg = null, wp = null) {
+  function lowStepAhead (pos, wantYawArg = null, wp = null, allowStairs = false) {
     const y = Math.floor(pos.y + 0.01)
     if (!passable(pos.offset(0, 2, 0), false, false)) return false
     const checkCell = (x, z) => {
       const a = bot.blockAt(new Vec3(x, y, z))
-      return Boolean(a && a.boundingBox === 'block' && passable(new Vec3(x, y + 1, z), false, false) && passable(new Vec3(x, y + 2, z), false, false))
+      if (!a || a.boundingBox !== 'block') return false
+      if (isBottomSlabBlock(a) || isLowFloorBlock(a)) return false
+      if (!allowStairs && isStairBlock(a) && (a.getProperties?.()?.half || a.properties?.half) !== 'top') return false
+      return Boolean(passable(new Vec3(x, y + 1, z), allowStairs, false) && passable(new Vec3(x, y + 2, z), false, false))
     }
     if (wp && wp.y > pos.y + 0.45 && horiz(wp.minus(pos)) < 1.55) {
       if (checkCell(Math.floor(wp.x), Math.floor(wp.z))) return true

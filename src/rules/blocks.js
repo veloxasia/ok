@@ -114,24 +114,33 @@ function specsFor (n, p) {
     const clickFace = OPP[f] || 'down'
     return [{ faces: [{ f: clickFace }], look: null, horiz: null, tag: 'hopper', sneak: true }]
   }
+  const validFacesFor = (faces, look, horiz) => {
+    const filtered = faces.filter(fo => fo.f !== look && fo.f !== horiz)
+    if (look === 'up') {
+      filtered.sort((a, b) => (a.f === 'down' ? -1 : b.f === 'down' ? 1 : 0))
+    }
+    return filtered
+  }
   if (n === 'crafter' && p.orientation) {
     const [front, top] = String(p.orientation).split('_')
     const isVert = front === 'up' || front === 'down'
+    const lk = OPP[front]
+    const hz = isVert && top ? OPP[top] : null
     return [
-      { faces: ALL_FACES, look: OPP[front], horiz: isVert && top ? OPP[top] : null, tag: 'crafter-a' }
+      { faces: validFacesFor(ALL_FACES, lk, hz), look: lk, horiz: hz, tag: 'crafter-a' }
     ]
   }
   if (/^(piston|sticky_piston|dispenser|dropper|barrel|command_block|chain_command_block|repeating_command_block)$/.test(n) && f) {
     return hyp([
-      { faces: ALL_FACES, look: OPP[f], horiz: null, tag: 'piston-a' },
-      { faces: ALL_FACES, look: f, horiz: null, tag: 'piston-b' }
+      { faces: validFacesFor(ALL_FACES, OPP[f], null), look: OPP[f], horiz: null, tag: 'piston-a' },
+      { faces: validFacesFor(ALL_FACES, f, null), look: f, horiz: null, tag: 'piston-b' }
     ])
   }
   if (n === 'observer' && f) {
     const obsFaces = (f === 'up' || f === 'down') ? [{ f: 'up' }, { f: 'down' }, ...H_FACES] : ALL_FACES
     return hyp([
-      { faces: obsFaces, look: f, horiz: null, tag: 'observer-b' },
-      { faces: obsFaces, look: OPP[f], horiz: null, tag: 'observer-a' }
+      { faces: validFacesFor(obsFaces, f, null), look: f, horiz: null, tag: 'observer-b' },
+      { faces: validFacesFor(obsFaces, OPP[f], null), look: f === 'up' || f === 'down' ? OPP[f] : OPP[f], horiz: null, tag: 'observer-a' }
     ])
   }
   if (/_stairs$/.test(n) && f) {
@@ -279,7 +288,7 @@ function describe (entry) {
   // lever/other "powered=true" targets are reached with a post toggle; slab 'type' (bottom/top/double) is never soft
   info.soft = Object.keys(info.cmp).filter(k => SOFT.has(k) && !(k === 'type' && /_slab$/.test(n)))
 
-  info.specs = specsFor(n, props)
+  info.specs = specsFor(n, props).map(s => ({ ...s, faces: s.faces.filter(fo => fo.f !== s.look && fo.f !== s.horiz) })).filter(s => s.faces.length > 0)
   if (!info.specs.length) { info.kind = 'unsupported'; info.note = 'no placement rule'; return info }
 
   // post actions --------------------------------------------------------------------------
@@ -339,8 +348,10 @@ function taskMatches (block, task) {
 // equal to the look/facing direction is impossible. Looking UP means the eye must be below the hit: in practice
 // only the underside of a block above is reachable.
 function usableFaces (spec) {
-  let faces = spec.faces.map(f => f.f).filter(f => f !== spec.look && f !== spec.horiz)
-  if (spec.look === 'up') faces = faces.filter(f => f === 'down')
+  const faces = spec.faces.map(f => f.f).filter(f => f !== spec.look && f !== spec.horiz)
+  if (spec.look === 'up') {
+    faces.sort((a, b) => (a === 'down' ? -1 : b === 'down' ? 1 : 0))
+  }
   return faces
 }
 

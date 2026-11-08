@@ -910,7 +910,7 @@ class ConstructionEngine {
         }
         const pf = this.engine ? this.engine.preflight(task) : { go: true }
         if (!pf.go) { this.engine.defer(task, pf); await sleep(15); continue }
-        for (let spamIdx = 0; spamIdx < 6 && task; spamIdx++) {
+        for (let spamIdx = 0; spamIdx < 24 && task; spamIdx++) {
           const t0 = Date.now()
           this.recorder?.taskStart(task)
           await this.placer.executeGuarded(task)
@@ -930,9 +930,12 @@ class ConstructionEngine {
           }
           if (!this.running || this.stopRequested || this.paused || this.bot._client?.ended || !this.bot.entity) break
           if (fleet) { fleet.coord.release(fleet.id); fleet.coord.beat(fleet.id) }
-          // Tight in-range spam continuation: if another ready task in the same order is immediately placeable from the current pose (or within a 1-block edge slide), chain it immediately!
-          if (!this.placer.hasInPlaceReadyTask(task.order, 1.85)) break
-          const nextSpam = this.planner.next(this.bot.entity.position)
+          // Tight in-range spam continuation: first chain any ready task in the current order that is directly placeable from the current standing pose without walking!
+          let nextSpam = this.planner.nextInPlace?.(this.bot.entity.position, task.order) || null
+          if (!nextSpam) {
+            if (!this.placer.hasInPlaceReadyTask(task.order, 1.85)) break
+            nextSpam = this.planner.next(this.bot.entity.position)
+          }
           if (!nextSpam) break
           if (nextSpam.order >= 100000 && this.config.building.pauseBeforePower && !this.powerAsked) {
             nextSpam.status = 'pending'

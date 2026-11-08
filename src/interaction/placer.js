@@ -636,9 +636,6 @@ class Placer {
     if (cand.edge && (alreadyOnCandCell || canDirectEdgeSlide)) {
       this._edgeSneakUntil = Date.now() + 1800
       this.setSneak(true)
-      if (cand.hit && this.look?.lookAtPoint) {
-        await this.look.lookAtPoint(cand.hit).catch(() => {})
-      }
       const canAimHereNow = Boolean(target && spec && this.aim.fromPose(target, spec, null, { ...(opts || {}), strictCurrentSneak: true }))
       if (!canAimHereNow) {
         this.setPhase('edge slide')
@@ -700,9 +697,6 @@ class Placer {
     if (cand.edge) {
       this._edgeSneakUntil = Date.now() + 1800
       this.setSneak(true)
-      if (cand.hit && this.look?.lookAtPoint) {
-        await this.look.lookAtPoint(cand.hit).catch(() => {})
-      }
       const canAimHere = Boolean(target && spec && this.aim.fromPose(target, spec, null, { ...(opts || {}), strictCurrentSneak: true }))
       if (!canAimHere) {
         this.setPhase('edge slide')
@@ -1456,9 +1450,21 @@ class Placer {
         lastReason = `reference cell ${key(R)} is pending schematic block ${rTask.name}`
         continue
       }
-      if (this.planner?.fleet?.coord?.busyFor?.(this.planner.fleet.id, { key: key(R), world: R }, false)) {
-        lastReason = `reference cell ${key(R)} is busy with another worker`
-        continue
+      const fCoord = this.planner?.fleet?.coord
+      if (fCoord?.workers) {
+        const selfId = this.planner.fleet.id
+        const rk = key(R)
+        let refBusy = false
+        for (const w of fCoord.workers.values()) {
+          if (w.id === selfId || Date.now() - (w.beat || 0) > 25_000) continue
+          if (w.target && w.target.key === rk) { refBusy = true; break }
+          const wp = fCoord.position?.(w)
+          if (wp && Math.hypot(wp.x - (R.x + 0.5), wp.z - (R.z + 0.5)) < 0.85 && wp.y + 1.8 > R.y && wp.y < R.y + 1.1) { refBusy = true; break }
+        }
+        if (refBusy) {
+          lastReason = `reference cell ${rk} is busy with another worker`
+          continue
+        }
       }
       const rb = this.world.blockAt(R)
       if (!rb || !(isAirLike(rb) || rb.name === 'water')) {
@@ -2375,10 +2381,10 @@ class Placer {
   }
 
   async rateGate () {
-    const [lo, hi] = this.config.human?.placeIntervalMs || [15, 25]
-    const perSec = Number(this.config.building?.maxPlacementsPerSecond || 20)
+    const [lo, hi] = this.config.human?.placeIntervalMs || [8, 16]
+    const perSec = Number(this.config.building?.maxPlacementsPerSecond || 25)
     const floor = perSec > 0 ? 1000 / perSec : 0
-    const gap = Math.max(floor, (lo + Math.random() * (hi - lo)) * (this.flow ? 0.45 : 0.75))
+    const gap = this.flow ? Math.min(12, floor * 0.4) : Math.max(floor * 0.65, (lo + Math.random() * (hi - lo)) * 0.5)
     const wait = (this._lastPlace || 0) + gap - Date.now()
     if (wait > 1) await sleep(wait)
     this._lastPlace = Date.now()
@@ -2413,7 +2419,7 @@ class Placer {
       ? Boolean(ref && isInteractive(ref.name))
       : (Boolean(spec.sneak) || Boolean(cand?.sneak) || Boolean(ref && isInteractive(ref.name)))
     return this.withSneak(sneak, async () => {
-      let refreshed = this.aim.fromPose(target, spec, null, {})
+      let refreshed = (cand?.direct && pose) ? pose : this.aim.fromPose(target, spec, null, {})
       if (!refreshed && cand?.edge) {
         await this.scaffold.slide(cand.stand, true).catch(() => {})
         refreshed = this.aim.fromPose(target, spec, null, {})
@@ -2447,11 +2453,16 @@ class Placer {
         this._chestSneak = false
         this.setSneak(false)
       }
-      if (spec.look || spec.horiz || spec.yaw16 != null) {
-        await nextTick(this.bot)
+      // Orientation already settled by aimAndValidate
+      if (!this.bot.entity.onGround && !this.bot.entity.isInWater && Math.abs(Number(this.bot.entity.velocity?.y || 0)) > 0.08) {
+        await this.ground.waitSafe(450).catch(() => {})
+        const settledPose = this.aim.fromPose(target, spec, null, {}) || aimed.pose
+        aimed = await this.aimAndValidate(target, spec, settledPose, {}, cand)
       }
       const sneakNowForVal = Boolean(this.bot.getControlState('sneak'))
       const eyeForVal = this.bot.entity.position.offset(0, this.aim.eyeHeight ? this.aim.eyeHeight(sneakNowForVal) : 1.62, 0)
+      const supNow = supportUnder(this.world, this.bot.entity.position, 0.16)
+      const groundedForVal = Boolean(this.bot.entity.onGround) || (Boolean(supNow?.supported) && Math.abs(Number(this.bot.entity.velocity?.y || 0)) <= 0.12)
       const vCheck = validatePlacement(
         target,
         { name: task.name, kind: task.kind, properties: task.properties, spec },
@@ -2461,12 +2472,12 @@ class Placer {
           dir: aimed.view.dir,
           faceName: aimed.pose.faceName,
           rayHit: { position: aimed.pose.ref, face: FACE_INDEX[aimed.pose.faceName] },
-          onGround: Boolean(this.bot.entity.onGround),
+          onGround: groundedForVal,
           isInWater: Boolean(this.bot.entity.isInWater),
-          velocityY: Number(this.bot.entity.velocity?.y || 0)
+          velocityY: groundedForVal ? -0.0784 : Number(this.bot.entity.velocity?.y || 0)
         },
         { refPos: aimed.pose.ref, refBlock: finalRefBlock },
-        (this.aim?.reach || 4.35) + 0.15
+        Math.max(4.68, (this.aim?.reach || 4.35) + 0.33)
       )
       if (!vCheck.valid) {
         this.aim?.noteAimFailure?.(target, aimed.pose.faceName, cand?.cell || this.bot.entity.position.floored())

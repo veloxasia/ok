@@ -113,16 +113,9 @@ class RecoveryManager {
     if (st === 'falling' || st === 'phantom' || st === 'airborne') {
       if (!this.badSince.airborne) this.badSince.airborne = Date.now()
       const elapsedAir = Date.now() - this.badSince.airborne
-      if (elapsedAir > 400) {
-        if (this.bot.getControlState?.('sneak')) {
+      if (elapsedAir > 450) {
+        if (this.bot.getControlState?.('sneak') && !this.bot.builder?.scaffold?._sliding) {
           try { this.bot.setControlState('sneak', false) } catch {}
-        }
-        const fc = new Vec3(Math.floor(e.position.x), Math.floor(e.position.y + 0.01), Math.floor(e.position.z))
-        const dxC = (fc.x + 0.5) - e.position.x
-        const dzC = (fc.z + 0.5) - e.position.z
-        if (Math.hypot(dxC, dzC) > 0.04) {
-          e.position.x += dxC * 0.55
-          e.position.z += dzC * 0.55
         }
         e.onGround = false
         if (e.velocity && e.velocity.y >= -0.02) e.velocity.y = -0.08

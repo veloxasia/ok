@@ -17,7 +17,8 @@ const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]]
 const DIAGS = [[1, 1], [1, -1], [-1, 1], [-1, -1]]
 const HAZARD = /(lava|fire|cactus|magma_block|sweet_berry_bush|cobweb|powder_snow|wither_rose|campfire|pointed_dripstone)/
 const NOSTAND = /(fence$|_wall$|scaffolding|^hopper$|cauldron|^composter$|^chest$|^trapped_chest$|^ender_chest$)/
-const HALF = /(_slab$|_stairs$|carpet$|^snow$|_bed$|^enchanting_table$|^daylight_detector$|^repeater$|^comparator$|^cake$|^soul_sand$|^farmland$|^dirt_path$|^lectern$)/
+const HALF = /(_slab$|carpet$|^snow$|_bed$|^enchanting_table$|^daylight_detector$|^repeater$|^comparator$|^cake$|^soul_sand$|^farmland$|^dirt_path$|^lectern$)/
+const isStair = b => Boolean(b && /_stairs$/.test(b.name || ''))
 const PASSDOOR = /(_door$|fence_gate|trapdoor)/
 
 function makeGraph (blockAt, maxDrop = 3, isBlockedCell = null) {
@@ -71,7 +72,7 @@ function makeGraph (blockAt, maxDrop = 3, isBlockedCell = null) {
     if (checkBlocked && (checkBlocked(x, y, z) || checkBlocked(x, y + 1, z))) return false
     if (isClimb(x, y, z) && (passable(x, y + 1, z) || isClimb(x, y + 1, z))) return true
     const here = get(x, y, z)
-    if (here && isHalf(here)) {
+    if (here && (isHalf(here) || isStair(here))) {
       if (/^(repeater|comparator|daylight_detector)$|carpet$|^snow$/.test(here.name || '')) {
         const below = get(x, y - 1, z)
         if (!below || below.boundingBox !== 'block' || HAZARD.test(below.name) || NOSTAND.test(below.name)) return false
@@ -96,6 +97,7 @@ function makeGraph (blockAt, maxDrop = 3, isBlockedCell = null) {
   }
   const surfaceY = (x, y, z) => {
     const here = get(x, y, z)
+    if (here && isStair(here)) return y + 0.5
     if (here && isHalf(here)) {
       if (/^(repeater|comparator|daylight_detector)$/.test(here.name || '')) return y + 0.125
       if (/carpet$|^snow$/.test(here.name || '')) return y + 0.0625
@@ -108,22 +110,15 @@ function makeGraph (blockAt, maxDrop = 3, isBlockedCell = null) {
     }
     return y
   }
-  const isClearParkourGap = (gx, gy, gz) => {
-    if (!passable(gx, gy, gz) || !passable(gx, gy + 1, gz) || !passable(gx, gy + 2, gz)) return false
-    if (isWater(gx, gy, gz) || isWater(gx, gy + 1, gz)) return false
-    const gBelow = get(gx, gy - 1, gz)
-    const gBelow2 = get(gx, gy - 2, gz)
-    if (HAZARD.test(gBelow?.name || '') || HAZARD.test(gBelow2?.name || '')) return false
-    return true
-  }
+  const isClearParkourGap = () => false
   const key = (x, y, z) => `${x},${y},${z}`
   const succ = (c) => {
     const out = []
     const curY = surfaceY(c.x, c.y, c.z)
-    if ((isClimb(c.x, c.y, c.z) || isClimb(c.x, c.y + 1, c.z) || isWater(c.x, c.y, c.z) || isWater(c.y + 1 && c.x, c.y + 1, c.z)) && passable(c.x, c.y + 2, c.z) && walkable(c.x, c.y + 1, c.z)) {
+    if ((isClimb(c.x, c.y, c.z) || isClimb(c.x, c.y + 1, c.z) || isWater(c.x, c.y, c.z) || isWater(c.y + 1 && c.x, c.y + 1, c.z) || isStair(get(c.x, c.y, c.z))) && passable(c.x, c.y + 2, c.z) && walkable(c.x, c.y + 1, c.z)) {
       out.push({ x: c.x, y: c.y + 1, z: c.z })
     }
-    if ((isClimb(c.x, c.y - 1, c.z) || isWater(c.x, c.y - 1, c.z)) && walkable(c.x, c.y - 1, c.z)) {
+    if ((isClimb(c.x, c.y - 1, c.z) || isWater(c.x, c.y - 1, c.z) || isStair(get(c.x, c.y - 1, c.z))) && walkable(c.x, c.y - 1, c.z)) {
       out.push({ x: c.x, y: c.y - 1, z: c.z })
     }
     for (const [dx, dz] of DIRS) {
@@ -178,10 +173,10 @@ function makeGraph (blockAt, maxDrop = 3, isBlockedCell = null) {
   const pred = (c) => {
     const out = []
     const curY = surfaceY(c.x, c.y, c.z)
-    if ((isClimb(c.x, c.y - 1, c.z) || isClimb(c.x, c.y, c.z) || isWater(c.x, c.y - 1, c.z) || isWater(c.x, c.y, c.z)) && passable(c.x, c.y + 1, c.z) && walkable(c.x, c.y - 1, c.z)) {
+    if ((isClimb(c.x, c.y - 1, c.z) || isClimb(c.x, c.y, c.z) || isWater(c.x, c.y - 1, c.z) || isWater(c.x, c.y, c.z) || isStair(get(c.x, c.y - 1, c.z))) && passable(c.x, c.y + 1, c.z) && walkable(c.x, c.y - 1, c.z)) {
       out.push({ x: c.x, y: c.y - 1, z: c.z })
     }
-    if ((isClimb(c.x, c.y, c.z) || isWater(c.x, c.y, c.z)) && walkable(c.x, c.y + 1, c.z)) {
+    if ((isClimb(c.x, c.y, c.z) || isWater(c.x, c.y, c.z) || isStair(get(c.x, c.y, c.z))) && walkable(c.x, c.y + 1, c.z)) {
       out.push({ x: c.x, y: c.y + 1, z: c.z })
     }
     for (const [dx, dz] of DIRS) {

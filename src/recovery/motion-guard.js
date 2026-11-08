@@ -12,8 +12,8 @@ const wrap = a => { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
 
 const DEFAULTS = {
-  maxYawStep: 75 * DEG, // fast human flick (1-2 ticks for any turn)
-  maxPitchStep: 55 * DEG,
+  maxYawStep: 120 * DEG, // fast human flick (1 tick for most turns)
+  maxPitchStep: 90 * DEG,
   minKeyHoldMs: 0, // zero artificial delay on movement keys so bots never overshoot or creep
   maxSpeed: 0.56, // blocks per tick on foot
   bump: 0.65
@@ -26,8 +26,8 @@ class MotionGuard {
     this.config = config
     const c = config?.motion || {}
     this.cfg = {
-      maxYawStep: Math.max(60, Number(c.maxYawDegPerTick ?? 75)) * DEG,
-      maxPitchStep: Math.max(45, Number(c.maxPitchDegPerTick ?? 55)) * DEG,
+      maxYawStep: Math.max(95, Number(c.maxYawDegPerTick ?? 120)) * DEG,
+      maxPitchStep: Math.max(75, Number(c.maxPitchDegPerTick ?? 90)) * DEG,
       minKeyHoldMs: 0,
       maxSpeed: Math.max(0.52, Number(c.maxSpeedPerTick ?? DEFAULTS.maxSpeed)),
       bump: DEFAULTS.bump,

@@ -287,7 +287,6 @@ class BuildPlanner {
   fleetOk (task, mode, botPosition = null) {
     const f = this.fleet
     const effOwner = this.effectiveOwner(task)
-    if (task.priorityBoost && (effOwner === f.index || !f.coord.busyFor(f.id, task, false))) return true
     if (mode === 'own') {
       if (effOwner !== f.index) return false
       if (f.coord.busyFor(f.id, task, false)) { this.sawBusy = true; return false }
@@ -344,13 +343,38 @@ class BuildPlanner {
       }
       return layer * 4 + 2.25
     }
-    if (info.name === 'tnt') return 110000 + layer
+    if (info.name === 'tripwire') return +(layer * 4 + 0.5).toFixed(2)
+    if (info.name === 'tnt') {
+      if (local && this.schematic) {
+        const upB = this.schematic.getBlock(new Vec3(local.x, local.y + 1, local.z))
+        const upN = upB?.name ? upB.name.replace(/^minecraft:/, '') : ''
+        if (upN && !/^(air|cave_air|void_air|water|lava|redstone_block|redstone_torch|redstone_wall_torch|lever)$/.test(upN)) {
+          return +(layer * 4 + 1.95).toFixed(2)
+        }
+      }
+      return 110000 + layer
+    }
     if (/^(sand|red_sand|gravel|anvil|chipped_anvil|damaged_anvil|dragon_egg)$|_concrete_powder$/.test(info.name) && local && this.schematic) {
       const below = this.schematic.getBlock(new Vec3(local.x, local.y - 1, local.z))
       const bName = below?.name ? below.name.replace(/^minecraft:/, '') : ''
       if (bName === 'piston_head' || bName === 'piston' || bName === 'sticky_piston') return 105000 + layer
     }
     if (info.phase === 3) {
+      if (info.name === 'redstone_block' && local && this.schematic) {
+        let touchesSensitive = false
+        let touchesObserver = false
+        let touchesWire = false
+        for (const [dx, dy, dz] of [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]]) {
+          const nb = this.schematic.getBlock(new Vec3(local.x + dx, local.y + dy, local.z + dz))
+          const nn = nb?.name ? nb.name.replace(/^minecraft:/, '') : ''
+          if (/^(tnt|piston|sticky_piston|dropper|dispenser|redstone_lamp|command_block|hopper)$/.test(nn)) touchesSensitive = true
+          if (nn === 'observer') touchesObserver = true
+          if (nn === 'redstone_wire') touchesWire = true
+        }
+        if (!touchesSensitive && touchesObserver && touchesWire) {
+          return +(layer * 4 + 1.85).toFixed(2)
+        }
+      }
       if (/^(redstone_torch|redstone_wall_torch)$/.test(info.name || "") && local && this.schematic) {
         const upB = this.schematic.getBlock(new Vec3(local.x, local.y + 1, local.z))
         const upN = upB?.name ? upB.name.replace(/^minecraft:/, "") : ""
@@ -369,6 +393,17 @@ class BuildPlanner {
         }
       }
       return 100000 + layer
+    }
+    if (info.name === 'redstone_wire' && local && this.schematic) {
+      let adjRb = false
+      let adjTnt = false
+      for (const [dx, dz] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        const nb = this.schematic.getBlock(new Vec3(local.x + dx, local.y, local.z + dz))
+        const nn = nb?.name ? nb.name.replace(/^minecraft:/, '') : ''
+        if (nn === 'redstone_block') adjRb = true
+        if (nn === 'tnt') adjTnt = true
+      }
+      if (adjRb && adjTnt) return +(layer * 4 + 1.9).toFixed(2)
     }
     if (/^(piston|sticky_piston)$/.test(info.name) && info.props?.extended === 'false' && /^(north|south|east|west)$/.test(info.props?.facing || '') && local && this.schematic) {
       const upDirect = this.schematic.getBlock(new Vec3(local.x, local.y + 1, local.z))
@@ -1292,19 +1327,7 @@ class BuildPlanner {
         // For stacked generator bands, group adjacent anchors in the same module into 2-anchor Boustrophedon (Snake) pairs
         // so bots build a wide 8-10 column platform at level i, then reverse direction at level i + 1 (0m walk to climb up, <=1 block vertical step between anchors)!
         const anchorGroups = []
-        if (isStackedGeneratorBand && orderedAnchors.length >= 256) {
-          for (let i = 0; i < orderedAnchors.length; i++) {
-            const a0 = orderedAnchors[i]
-            if (i + 1 < orderedAnchors.length && Math.hypot(orderedAnchors[i + 1].x - a0.x, orderedAnchors[i + 1].z - a0.z) <= 5.5) {
-              anchorGroups.push([a0, orderedAnchors[i + 1]])
-              i++
-            } else {
-              anchorGroups.push([a0])
-            }
-          }
-        } else {
-          for (const a of orderedAnchors) anchorGroups.push([a])
-        }
+        for (const a of orderedAnchors) anchorGroups.push([a])
 
         for (let cid = 0; cid < anchorGroups.length; cid++) {
           const grpAnchors = anchorGroups[cid]
@@ -2289,6 +2312,28 @@ class BuildPlanner {
       const parent = this.tasks.get(task.parentKey)
       if (!parent || parent.status !== 'completed') return false
     }
+    if (task.order < 88000 && (task.name === 'redstone_block' || task.name === 'redstone_wire' || task.name === 'tnt')) {
+      const tx = task.world.x; const ty = task.world.y; const tz = task.world.z
+      if (task.name === 'redstone_block') {
+        for (const [dx, dz] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+          const nt = this.tasks.get(`${tx + dx},${ty},${tz + dz}`)
+          if (nt && nt.name === 'observer' && nt.order < task.order && nt.status !== 'completed' && nt.status !== 'blocked') return false
+        }
+      } else if (task.name === 'redstone_wire') {
+        for (const [dx, dz] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+          const nt = this.tasks.get(`${tx + dx},${ty},${tz + dz}`)
+          if (nt && nt.name === 'redstone_block' && nt.order < task.order && nt.status !== 'completed' && nt.status !== 'blocked') return false
+        }
+      } else if (task.name === 'tnt') {
+        for (let dx = -1; dx <= 1; dx++) {
+          for (let dz = -1; dz <= 1; dz++) {
+            if (dx === 0 && dz === 0) continue
+            const nt = this.tasks.get(`${tx + dx},${ty},${tz + dz}`)
+            if (nt && (nt.name === 'observer' || nt.name === 'redstone_block' || nt.name === 'redstone_wire') && nt.order < task.order && nt.status !== 'completed' && nt.status !== 'blocked') return false
+          }
+        }
+      }
+    }
     return true
   }
 
@@ -2519,10 +2564,14 @@ class BuildPlanner {
             continue
           }
         }
-        // For module cluster bases (L13/L14 cobblestone + waterlogged oak_leaves), allow looking up to 8 tasks ahead in the active cluster
-        // so the bot spams all immediately reachable cobblestone/oak_leaves/waterlog tasks in range before moving,
-        // AND if the bot is already inside this active cluster (cl.ptr > 0 && dist <= 8.5), keep working on cl.tasks[cl.ptr] instead of abandoning the cluster to walk 40-72 blocks across the map!
-        const maxLook = group.isModuleClusterBase ? Math.min(cl.tasks.length, cl.ptr + 8) : cl.ptr + 1
+        const headTask = cl.tasks[cl.ptr]
+        if (!headTask) continue
+        if (mode === 'own' && this.fleet && this.effectiveOwner(headTask) !== this.fleet.index && !headTask.priorityBoost) continue
+        const headDist = botPosition ? headTask.world.distanceTo(botPosition) : 0
+        if (best && bestScore < -150 && headDist > 12 && !headTask.priorityBoost) continue
+        const maxLook = headDist <= 6.5
+          ? (group.isModuleClusterBase ? Math.min(cl.tasks.length, cl.ptr + 8) : (cl.ptr > 0 ? Math.min(cl.tasks.length, cl.ptr + 6) : cl.ptr + 1))
+          : cl.ptr + 1
         let chosenInCl = null
         let chosenInPlace = false
         let activeUnreadyInCl = null
@@ -2549,7 +2598,7 @@ class BuildPlanner {
             break
           }
           if (!chosenInCl) chosenInCl = candT
-          if (!group.isModuleClusterBase) break
+          if (!group.isModuleClusterBase && (!group.isVerticalWallBand || candT.verticalAnchorCol || candT.world.y !== cl.tasks[cl.ptr].world.y)) break
         }
         if (!chosenInCl && activeUnreadyInCl) chosenInCl = activeUnreadyInCl
         if (!chosenInCl) continue
@@ -2623,9 +2672,10 @@ class BuildPlanner {
               if (dist < bestBoostScore) { bestBoostScore = dist; bestBoost = task }
             }
             const clusterBonus = this.activeClusterBonus(task)
-            if (this.probe && dist <= 4.7 && this.probe(task) && (!group.isVerticalWallBand || clusterBonus < 0)) {
-              const s = (task.priorityBoost ? -500 : 0) + clusterBonus + rcBonus + dist + task.attempts * 20 - retreatBonus
-              if (s < bestInPlaceScore) { bestInPlaceScore = s; bestInPlace = task }
+            const sInPlace = (task.priorityBoost ? -500 : 0) + clusterBonus + rcBonus + dist + task.attempts * 20 - retreatBonus
+            if (this.probe && dist <= 4.7 && sInPlace < bestInPlaceScore && (!group.isVerticalWallBand || clusterBonus < 0) && this.probe(task)) {
+              bestInPlaceScore = sInPlace
+              bestInPlace = task
             } else if (dist <= 7.5) {
               const s = clusterBonus + rcBonus + dist + Math.abs(task.world.y - botPosition.y) * 1.2 + task.attempts * 25 + ((task.verticalClusterSeq ?? task.seq) || 0) * 0.02 - retreatBonus
               if (s < bestLocalReadyScore) { bestLocalReadyScore = s; bestLocalReady = task }
@@ -2719,6 +2769,77 @@ class BuildPlanner {
       }
     }
     return out
+  }
+
+  nextInPlace (botPosition, currentOrder) {
+    if (!botPosition || !this.probe || currentOrder == null) return null
+    this.syncFleet()
+    const group = this.orderGroups.get(currentOrder)
+    if (!group || group.remaining <= 0) return null
+    const now = Date.now()
+    if ((group.isVerticalWallBand || group.isModuleClusterBase) && group.clusters) {
+      let bestClTask = null
+      let bestClDist = Infinity
+      for (const cl of group.clusters) {
+        while (cl.ptr < cl.tasks.length) {
+          const _ct = cl.tasks[cl.ptr]
+          if (_ct.status === 'completed' || _ct.status === 'blocked') { cl.ptr++; continue }
+          if (this.isCorrect(_ct)) { this.markCompleted(_ct); cl.ptr++; continue }
+          break
+        }
+        if (cl.ptr >= cl.tasks.length) continue
+        const headT = cl.tasks[cl.ptr]
+        if (headT.world.distanceTo(botPosition) > 5.0) continue
+        const lookLim = group.isModuleClusterBase ? Math.min(cl.tasks.length, cl.ptr + 8) : Math.min(cl.tasks.length, cl.ptr + 6)
+        for (let idx = cl.ptr; idx < lookLim; idx++) {
+          const candT = cl.tasks[idx]
+          if (!candT || !this.usable(candT, now)) continue
+          if (idx > cl.ptr && !group.isModuleClusterBase && (candT.verticalAnchorCol || candT.world.y !== headT.world.y)) break
+          if (this.hasDirectlyUnfinishedBelow(candT)) continue
+          if (this.fleet && this.fleet.coord.busyFor(this.fleet.id, candT, false)) continue
+          const d = candT.world.distanceTo(botPosition)
+          if (d > 4.6) continue
+          if (!this.isReady(candT)) continue
+          if (candT.verticalAnchorCol || this.probe(candT)) {
+            const score = (idx === cl.ptr ? -20 : 0) + (cl.ptr > 0 ? -100 : 0) + d
+            if (score < bestClDist) {
+              bestClDist = score
+              bestClTask = candT
+            }
+            if (idx === cl.ptr && cl.ptr > 0) return this.take(candT)
+          }
+        }
+      }
+      return bestClTask ? this.take(bestClTask) : null
+    }
+    const bx = Math.floor(botPosition.x / CELL)
+    const bz = Math.floor(botPosition.z / CELL)
+    const lp = this._lastPlacedPos
+    let best = null
+    let bestScore = Infinity
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        const set = group.cells.get(`${bx + dx},${bz + dz}`)
+        if (!set || !set.size) continue
+        for (const task of set) {
+          if (!this.usable(task, now)) continue
+          if (this.hasDirectlyUnfinishedBelow(task)) continue
+          if (task.info?.fragile && this.refPending(task)) continue
+          if (this.fleet && this.fleet.coord.busyFor(this.fleet.id, task, false)) continue
+          const dist = task.world.distanceTo(botPosition)
+          if (dist > 4.6) continue
+          const stepFromLast = lp ? (Math.abs(task.world.x - lp.x) + Math.abs(task.world.y - lp.y) + Math.abs(task.world.z - lp.z)) : 4
+          const ownBonus = (!this.fleet || this.effectiveOwner(task) === this.fleet.index) ? -4.0 : 0
+          const score = ownBonus + stepFromLast * 0.8 + dist * 0.5 + (task.attempts || 0) * 15
+          if (score >= bestScore) continue
+          if (!this.isReady(task)) continue
+          if (!this.probe(task)) continue
+          bestScore = score
+          best = task
+        }
+      }
+    }
+    return best ? this.take(best) : null
   }
 
   next (botPosition) {
@@ -3021,8 +3142,11 @@ class BuildPlanner {
           return
         }
       }
+      if (/is busy with another worker/i.test(task.lastError) && this.fleet && this.fleet.count > 1) {
+        task.owner = ((task.owner ?? this.fleet.index) + 1) % this.fleet.count
+      }
       task.status = 'deferred'
-      task.deferredUntil = Date.now() + (error?.code === 'UNSAFE' ? 2_500 : 1_200)
+      task.deferredUntil = Date.now() + (error?.code === 'UNSAFE' ? 2_500 : 2_000)
       return
     }
     task.attempts += 1

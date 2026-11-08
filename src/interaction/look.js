@@ -69,8 +69,9 @@ class AimController {
       // Calling `bot.look(ty, tp, true)` directly avoids double-throttling while guaranteeing the exact final angle!
       if (bot.__motion) {
         await bot.look(ty, tp, true)
+        if (amp > 55 * DEG) await nextTick(bot)
       } else {
-        const ticks = Math.max(1, Math.min(5, Math.ceil(amp / (24 * DEG))))
+        const ticks = Math.max(1, Math.min(3, Math.ceil(amp / (45 * DEG))))
         for (let i = 1; i <= ticks; i++) {
           const t = i / ticks
           const f = t * t * t * (10 - 15 * t + 6 * t * t)
@@ -78,7 +79,6 @@ class AimController {
           if (i < ticks) await nextTick(bot)
         }
       }
-      await nextTick(bot)
     } finally {
       bot.__looking = false
     }

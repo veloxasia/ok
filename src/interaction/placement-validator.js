@@ -145,7 +145,7 @@ function validatePlacement (target, state = {}, aim = null, support = {}, reach 
     // Side-face overhang check when standing above `refPos.y + 1.0` (eliminates "ray hit face 1, wanted 2/3/4/5")
     if ((fv[0] !== 0 || fv[2] !== 0) && aim.eye.y > refPos.y + 1.0) {
       const frontDist = -(dir.x * fv[0] + dir.z * fv[2])
-      if (frontDist < 0.16) {
+      if (frontDist < 0.015) {
         return {
           valid: false,
           code: 'BAD_AIM_FACE',
@@ -174,26 +174,26 @@ function validatePlacement (target, state = {}, aim = null, support = {}, reach 
 
   // Rule 3: Observer orientation & state validation
   if (blockName === 'observer') {
-    const wantedFacing = props.facing || state.spec?.look
-    if (wantedFacing) {
-      const gotFacing = dominantDir(dir)
-      if (gotFacing !== wantedFacing) {
+    const wantedLook = state.spec?.look || props.facing
+    if (wantedLook) {
+      const gotLook = dominantDir(dir)
+      if (gotLook !== wantedLook) {
         return {
           valid: false,
           code: 'INVALID_OBSERVER_STATE',
-          reason: `observer look direction yields facing=${gotFacing}, wanted facing=${wantedFacing}`
+          reason: `observer look direction yields ${gotLook}, wanted ${wantedLook}`
         }
       }
-      if (wantedFacing === 'up' || wantedFacing === 'down') {
-        if (Math.abs(dir.y) / dirLen < 0.68) {
+      if (wantedLook === 'up' || wantedLook === 'down') {
+        if (Math.abs(dir.y) / dirLen < 0.66) {
           return {
             valid: false,
             code: 'INVALID_OBSERVER_STATE',
-            reason: `vertical observer pitch too shallow (|dy|/len=${(Math.abs(dir.y) / dirLen).toFixed(2)} < 0.68)`
+            reason: `vertical observer pitch too shallow (|dy|/len=${(Math.abs(dir.y) / dirLen).toFixed(2)} < 0.66)`
           }
         }
       } else {
-        if (Math.abs(dir.y) / dirLen > 0.55 || horizontalDir(dir) !== wantedFacing) {
+        if (Math.abs(dir.y) / dirLen > 0.58 || horizontalDir(dir) !== wantedLook) {
           return {
             valid: false,
             code: 'INVALID_OBSERVER_STATE',
@@ -206,14 +206,15 @@ function validatePlacement (target, state = {}, aim = null, support = {}, reach 
 
   // Rule 4: Piston / sticky_piston orientation & state validation
   if (blockName === 'piston' || blockName === 'sticky_piston') {
-    const wantedFacing = props.facing || state.spec?.look
-    if (wantedFacing) {
-      const gotFacing = dominantDir(dir)
-      if (gotFacing !== wantedFacing) {
+    const OPP_DIR = { north: 'south', south: 'north', east: 'west', west: 'east', up: 'down', down: 'up' }
+    const wantedLook = state.spec?.look || (props.facing ? OPP_DIR[props.facing] || props.facing : null)
+    if (wantedLook) {
+      const gotLook = dominantDir(dir)
+      if (gotLook !== wantedLook && gotLook !== props.facing) {
         return {
           valid: false,
           code: 'INVALID_PISTON_STATE',
-          reason: `${blockName} look direction yields facing=${gotFacing}, wanted facing=${wantedFacing}`
+          reason: `${blockName} look direction yields ${gotLook}, wanted ${wantedLook}`
         }
       }
     }

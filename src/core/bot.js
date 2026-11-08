@@ -69,6 +69,11 @@ function createBuilderBot (config, fleet = null, authOpts = null) {
 
   bot.once('login', () => {
     if (bot.version && !config.server.version) config.server._detectedVersion = bot.version
+    if (bot.version) fleet?.send?.({ t: 'version', version: bot.version })
+    try {
+      bot._client?.socket?.setNoDelay?.(true)
+      bot._client?.socket?.setKeepAlive?.(true, 15_000)
+    } catch {}
     if (!config.diagnostics?.quietStartup) logger.info(`login version=${bot.version}`)
   })
   bot.on('error', error => {
@@ -91,8 +96,10 @@ function createBuilderBot (config, fleet = null, authOpts = null) {
   bot.on('kicked', reason => logger.warn(`kicked: ${reason}`))
   bot.on('end', reason => {
     logger.warn(`connection ended: ${reason}`)
+    if (bot._idlePulseTimer) { clearInterval(bot._idlePulseTimer); bot._idlePulseTimer = null }
     try { bot.recovery?.stop?.() } catch {}
     try { bot.builder?.shutdown?.() } catch {}
+    try { bot.entity = null } catch {}
     fleet?.coord.unregister(fleet.id)
   })
 
@@ -185,8 +192,8 @@ function createBuilderBot (config, fleet = null, authOpts = null) {
       }
     }
     try {
-      const timeoutMs = Math.max(1000, Number(config.navigation.chunkPreloadTimeoutMs ?? 30000))
-      const minColumns = Math.max(1, Number(config.navigation.minLoadedChunkColumns ?? 9))
+      const timeoutMs = Math.min(8000, Math.max(1000, Number(config.navigation.chunkPreloadTimeoutMs ?? 6000)))
+      const minColumns = Math.min(4, Math.max(1, Number(config.navigation.minLoadedChunkColumns ?? 4)))
       if (typeof bot.waitForChunksToLoad === 'function') {
         let ready = false
         const started = Date.now()
@@ -218,12 +225,26 @@ function createBuilderBot (config, fleet = null, authOpts = null) {
       logger.warn(`chunk preload warning: ${error.message}`)
     }
 
+    if (bot._client?.ended || (fleet?.currentBot && fleet.currentBot !== bot)) return
     if (fleet) fleet.coord.register(fleet.id, fleet.index, bot)
     try { new (require('../recovery/motion-guard').MotionGuard)(bot, config, logger).attach() } catch (error) { logger.warn(`motion guard unavailable: ${error.message}`) }
     bot.builder = new ConstructionEngine(bot, config, logger, fleet
       ? { fleet: { coord: fleet.coord, id: fleet.id, index: fleet.index, count: fleet.count }, learner: fleet.shared.learner, experience: fleet.shared.experience }
       : {})
     await bot.builder.init()
+    if (bot._client?.ended || (fleet?.currentBot && fleet.currentBot !== bot)) return
+    if (!bot._idlePulseTimer) {
+      bot._idlePulseTimer = setInterval(() => {
+        try {
+          if (bot._client?.ended || !bot.entity) return
+          if (!bot.builder?.running && !bot.pathfinder?.isMoving?.()) {
+            const dyaw = (Math.random() - 0.5) * 0.04
+            bot.look(bot.entity.yaw + dyaw, bot.entity.pitch, true).catch?.(() => {})
+          }
+        } catch {}
+      }, 22_000)
+      bot._idlePulseTimer.unref?.()
+    }
     bot.recovery = new RecoveryManager(bot, bot.builder.navigation, new WorldModel(bot), config, logger, bot.builder.ground)
     bot.recovery.start()
     const defaultSchematic = config.control?.defaultSchematic || config.paths?.defaultSchematic || null

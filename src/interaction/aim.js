@@ -60,7 +60,7 @@ function specAccepts (spec, faceOpt, dir, hit, refPos, strict = true) {
     const lateral = Math.abs((eyeX - (refPos.x + 0.5)) * F[2] + (eyeZ - (refPos.z + 0.5)) * F[0])
     const frontDist = -(dir.x * F[0] + dir.z * F[2])
     if (strict && lateral > 0.45 && frontDist < 0.24) return false
-    if (eyeY > refPos.y + 1.0 && frontDist < (strict ? 0.16 : 0.08)) return false
+    if (eyeY > refPos.y + 1.0 && frontDist < (strict ? 0.075 : 0.02)) return false
     if (eyeY < refPos.y && frontDist < (strict ? 0.14 : 0.03)) return false
   }
   if (spec.look) {
@@ -341,30 +341,23 @@ class AimSolver {
   }
 
   noteAimFailure (target, faceName, cell = null) {
-    if (!target || !faceName) return
+    if (!target || !faceName || !cell || typeof cell.x !== 'number') return
     const now = Date.now()
-    const tk = `${target.x},${target.y},${target.z}|${faceName}`
-    this.aimBlacklist.set(tk, (this.aimBlacklist.get(tk) || 0) + 1)
-    this.aimBlacklist.set(`${tk}@at`, now)
-    if (cell && typeof cell.x === "number") {
-      const ck = `${tk}|${Math.floor(cell.x)},${Math.floor(cell.y)},${Math.floor(cell.z)}`
-      this.aimBlacklist.set(ck, now)
-    }
+    if (this.aimBlacklist.size > 300) this.aimBlacklist.clear()
+    const ck = `${target.x},${target.y},${target.z}|${faceName}|${Math.floor(cell.x)},${Math.floor(cell.y)},${Math.floor(cell.z)}`
+    this.aimBlacklist.set(ck, now)
   }
 
-  isAimBlacklisted (target, faceName, cell = null, ttlMs = 30000) {
-    if (!this.aimBlacklist || !this.aimBlacklist.size || !target || !faceName) return false
-    const now = Date.now()
-    const tk = `${target.x},${target.y},${target.z}|${faceName}`
-    if (cell && typeof cell.x === "number") {
-      const ck = `${tk}|${Math.floor(cell.x)},${Math.floor(cell.y)},${Math.floor(cell.z)}`
-      const at = this.aimBlacklist.get(ck)
-      if (at && now - at < ttlMs) return true
+  isAimBlacklisted (target, faceName, cell = null, ttlMs = 10000) {
+    if (!this.aimBlacklist || !this.aimBlacklist.size || !target || !faceName || !cell || typeof cell.x !== 'number') return false
+    const ck = `${target.x},${target.y},${target.z}|${faceName}|${Math.floor(cell.x)},${Math.floor(cell.y)},${Math.floor(cell.z)}`
+    const at = this.aimBlacklist.get(ck)
+    if (!at) return false
+    if (Date.now() - at >= ttlMs) {
+      this.aimBlacklist.delete(ck)
+      return false
     }
-    const faceFails = this.aimBlacklist.get(tk) || 0
-    const faceAt = this.aimBlacklist.get(`${tk}@at`) || 0
-    if (faceFails >= 2 && now - faceAt < ttlMs) return true
-    return false
+    return true
   }
 
   clearAimBlacklist () {
@@ -853,7 +846,19 @@ class AimSolver {
   }
 
   pickHit (eye, samples, spec, faceOpt, refPos, avoid = null, ignorePos = null, maxReach = this.reach) {
-    for (const p of samples) {
+    const F = VEC[faceOpt.f]
+    let ordered = samples
+    if (F && (F[0] !== 0 || F[2] !== 0) && refPos && eye.y > refPos.y + 1.0 && !spec.look && !faceOpt.half && !faceOpt.cy) {
+      const frontDist = (eye.x - (refPos.x + 0.5 + F[0] * 0.5)) * F[0] + (eye.z - (refPos.z + 0.5 + F[2] * 0.5)) * F[2]
+      if (frontDist < 0.25) {
+        ordered = samples.slice().sort((a, b) => {
+          const latA = Math.abs((a.x - eye.x) * F[2] + (a.z - eye.z) * F[0])
+          const latB = Math.abs((b.x - eye.x) * F[2] + (b.z - eye.z) * F[0])
+          return (b.y - a.y) * 2.5 + (latA - latB)
+        })
+      }
+    }
+    for (const p of ordered) {
       if (avoid && avoid.some(a => a.distanceTo(p) < 0.012)) continue
       const d = p.minus(eye)
       const len = d.norm()

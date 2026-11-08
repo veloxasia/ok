@@ -268,20 +268,32 @@ class BuildPlanner {
     return count
   }
 
+  effectiveOwner (task) {
+    if (!this.fleet || task?.owner == null) return this.fleet?.index ?? 0
+    if (task.owner === this.fleet.index) return this.fleet.index
+    const coord = this.fleet.coord
+    if (!coord || typeof coord.isWorkerIndexOnline !== 'function') return task.owner
+    if (coord.isWorkerIndexOnline(task.owner)) return task.owner
+    const online = coord.onlineBuilderIndices?.() || []
+    if (!online.length) return this.fleet.index
+    return online[Math.abs(task.owner) % online.length]
+  }
+
   assignedToMe (task) {
     if (!this.fleet) return true
-    return task?.owner === this.fleet.index
+    return this.effectiveOwner(task) === this.fleet.index
   }
 
   fleetOk (task, mode, botPosition = null) {
     const f = this.fleet
-    if (task.priorityBoost && (task.owner === f.index || !f.coord.busyFor(f.id, task, false))) return true
+    const effOwner = this.effectiveOwner(task)
+    if (task.priorityBoost && (effOwner === f.index || !f.coord.busyFor(f.id, task, false))) return true
     if (mode === 'own') {
-      if (task.owner !== f.index) return false
+      if (effOwner !== f.index) return false
       if (f.coord.busyFor(f.id, task, false)) { this.sawBusy = true; return false }
       return true
     }
-    if (task.owner === f.index) return false
+    if (effOwner === f.index) return false
     if (f.coord.busyFor(f.id, task, true)) { this.sawBusy = true; return false }
     if (botPosition && f.coord?.workers) {
       const myDist = Math.hypot(task.world.x - botPosition.x, task.world.z - botPosition.z)
@@ -2488,7 +2500,8 @@ class BuildPlanner {
       }
       return ownTask
     }
-    if (group.isSingleWorkerChain && group.chainOwner !== undefined && group.chainOwner !== this.fleet.index) {
+    const effChainOwner = group.chainOwner !== undefined ? this.effectiveOwner({ owner: group.chainOwner }) : undefined
+    if (group.isSingleWorkerChain && effChainOwner !== undefined && effChainOwner !== this.fleet.index) {
       const isBackupWorker = this.fleet.count > 1 && this.fleet.index === ((group.chainOwner + 1) % this.fleet.count)
       if (!this.hasDeferredInGroup(group) || !isBackupWorker) {
         this.sawBusy = true
@@ -2713,9 +2726,9 @@ class BuildPlanner {
       }
       const needColumnGuard = minOpenLayer !== null && layer > minOpenLayer
       if (sawUnreadyOnMinLayer && !needColumnGuard && minOpenLayer !== null && order >= minOpenLayer * 4 + 2) {
-        continue
+        return null
       }
-      if (needColumnGuard && (layer > minOpenLayer + 1 || order >= (minOpenLayer + 1) * 4 + 2 || this.hasPendingFluids(minOpenLayer) || (minOpenLayer >= 4 && !group.isVerticalWallBand && this.layerRemainingCount(minOpenLayer) > 96 && this.layerHasUnbusyReady(minOpenLayer, now)))) {
+      if (needColumnGuard && (layer > minOpenLayer + 1 || order >= (minOpenLayer + 1) * 4 + 2 || this.hasPendingFluids(minOpenLayer) || (!group.isVerticalWallBand && (this.layerRemainingCount(minOpenLayer) > 48 || this.layerHasUnbusyReady(minOpenLayer, now))))) {
         return null
       }
       this.enforceColumnGuard = needColumnGuard
@@ -2742,7 +2755,8 @@ class BuildPlanner {
           this.enforceColumnGuard = false
         }
         if (hasCand && !needColumnGuard) {
-          const isOtherWorkerChain = Boolean(this.fleet && group.isSingleWorkerChain && group.chainOwner !== this.fleet.index)
+          const effChainOwner = group.chainOwner !== undefined ? this.effectiveOwner({ owner: group.chainOwner }) : undefined
+          const isOtherWorkerChain = Boolean(this.fleet && group.isSingleWorkerChain && effChainOwner !== this.fleet.index)
           if (order < minOpenLayer * 4 + 2 && !isOtherWorkerChain) {
             sawUnreadyOnMinLayer = true
             continue
@@ -2927,7 +2941,7 @@ class BuildPlanner {
           counts[k] = (counts[k] || 0) + 1
           if (t.status === "blocked" || this.quarantined?.has(t.key)) continue
           if ((t.attempts || 0) >= 2 && this.remainingCount() > 25) continue
-          if (this.fleet && t.owner !== this.fleet.index && (t.status === "failed" || (t.attempts || 0) >= 1)) continue
+          if (this.fleet && this.effectiveOwner(t) !== this.fleet.index && (t.status === "failed" || (t.attempts || 0) >= 1)) continue
           if (this.fleet && this.fleet.coord.busyFor(this.fleet.id, t, true)) continue
           if ((t.kind === "fluid" || t.kind === "waterlog" || t.info?.fragile || t.name === "hopper") && (!this.isReady(t) || this.refPending(t))) continue
           if (this.hasDirectlyUnfinishedBelow(t)) continue

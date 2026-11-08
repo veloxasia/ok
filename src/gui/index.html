@@ -58,10 +58,10 @@ table{width:100%;border-collapse:collapse}td,th{padding:4px 6px;text-align:left;
 <p class="hint" id="modeHint"></p>
 </section>
 
-<section><h2>2 · Accounts <span class="st">(one bot per ticked account — 5th bot auto-runs as Janitor/Sweeper)</span></h2>
+<section><h2>2 · Accounts <span class="st">(supports any custom bot count 1..N — set Role to Auto, Builder, or Sweeper)</span></h2>
 <table id="accounts"><thead><tr><th>On</th><th>In-game name</th><th>Role</th><th>Login</th><th id="secHead"></th><th></th></tr></thead><tbody></tbody></table>
 <div class="row" style="margin-top:8px"><button class="sec" id="addAcc">+ Add account</button></div>
-<p class="hint"><b>Role</b>: Leave on <b>Auto</b> so bots 1–4 build the schematic and the 5th bot automatically acts as the <b>Sweeper / Janitor</b> (using Ender Pearls to break temporary bridges/pillars), or manually set any account to Builder / Sweeper.</p>
+<p class="hint"><b>Custom Bot Count &amp; Roles</b>: Add and tick any custom number of bots (1, 2, 3, 4, 5, 6, 7, 8, 10+). Set each bot's <b>Role</b> to <b>Builder</b> (all bots build), <b>Sweeper</b> (dedicated janitor), or <b>Auto</b> (all build when 1–4 bots; last bot acts as Sweeper when 5+ bots). If any bot disconnects, online bots automatically take over its tasks.</p>
 </section>
 
 <section><h2>3 · Build</h2>
@@ -160,7 +160,7 @@ function drawAccounts(){const tb=$('accounts').querySelector('tbody');tb.innerHT
  accounts.forEach((a,i)=>{const tr=document.createElement('tr')
   tr.innerHTML=`<td><input type=checkbox ${a.enabled?'checked':''} data-k=enabled></td>
   <td><input data-k=username placeholder="exact in-game name"></td>
-  <td><select data-k=role><option value=auto>Auto</option><option value=builder>Builder</option><option value=sweeper>Sweeper (5th)</option></select></td>
+  <td><select data-k=role><option value=auto>Auto</option><option value=builder>Builder</option><option value=sweeper>Sweeper (Janitor)</option></select></td>
   <td><select data-k=mode><option value=microsoft>Microsoft</option><option value=session>Session token</option><option value=offline>Cracked</option></select></td>
   <td style="white-space:nowrap"><input data-k=secret type=password style="width:140px"> <button class=sec data-act=verify>Verify</button></td>
   <td><button class=sec data-act=del title="Remove">✕</button></td>`

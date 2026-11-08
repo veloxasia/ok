@@ -63,8 +63,8 @@ async function superviseOne (config, fleet, createBuilderBot, logger) {
     if (!config.server.autoReconnect) break
     attempt += 1
     if (global.gc) { try { global.gc() } catch {} }
-    const baseDelay = Math.max(15_000, Number(config.server.reconnectDelayMs || 15_000))
-    const delay = Math.min(90_000, baseDelay * Math.pow(1.6, Math.min(5, Math.max(0, attempt - 1))) + (fleet ? 4500 * fleet.index : 0))
+    const baseDelay = up > 45_000 ? 6_000 : Math.max(10_000, Number(config.server.reconnectDelayMs || 12_000))
+    const delay = Math.min(60_000, baseDelay * Math.pow(1.5, Math.min(4, Math.max(0, attempt - 1))) + (fleet ? 2500 * (fleet.index % 6) : 0))
     logger.warn(`${config.server.username}: reconnecting in ${delay}ms`)
     await sleep(delay)
   }

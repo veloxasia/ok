@@ -54,9 +54,30 @@ class Coordinator {
   hasActiveSweeper () {
     const now = Date.now()
     for (const w of this.workers.values()) {
-      if (w.role === 'sweeper' && now - (w.beat || 0) < 45_000) return true
+      if (w.role === 'sweeper' && now - (w.beat || 0) < 25_000 && (w.pos != null || w.bot?.entity != null)) return true
     }
     return false
+  }
+
+  isWorkerIndexOnline (index) {
+    const now = Date.now()
+    for (const w of this.workers.values()) {
+      if (w.index === index && now - (w.beat || 0) < 20_000 && (w.pos != null || w.bot?.entity != null)) return true
+    }
+    return false
+  }
+
+  onlineBuilderIndices () {
+    const now = Date.now()
+    const out = []
+    for (const w of this.workers.values()) {
+      if (w.role === 'sweeper') continue
+      if (Number.isInteger(w.index) && w.index >= 0 && now - (w.beat || 0) < 20_000 && (w.pos != null || w.bot?.entity != null)) {
+        out.push(w.index)
+      }
+    }
+    out.sort((a, b) => a - b)
+    return out
   }
 
   // ---- finished / reopened blocks ---------------------------------------------------------------

@@ -20,6 +20,7 @@ class Hub {
     this.leaderId = null
     this.loginChain = Promise.resolve()
     this.lastLogin = 0
+    this.detectedVersion = null
     if (jobFile && resume) { try { this.job = JSON.parse(fs.readFileSync(jobFile, 'utf8')) } catch { this.job = null } }
   }
 
@@ -68,15 +69,21 @@ class Hub {
           st.alive = true
           if (m.role) st.role = m.role
         }
-        this.send(id, { t: 'state', job: this.job, log: this.log, workers: this.snapshot(), tempBlocks: [...this.tempBlocks.entries()] })
+        this.send(id, { t: 'state', job: this.job, log: this.log, workers: this.snapshot(), tempBlocks: [...this.tempBlocks.entries()], version: this.detectedVersion })
         if (m.role) this.broadcast({ t: 'role', id, role: m.role }, id)
         break
       case 'role':
         if (st && m.role) st.role = m.role
         this.broadcast(m, id)
         break
-      case 'ping': if (st) st.alive = true; break
-      case 'pos': if (st) { st.pos = m.pos; st.alive = true } this.broadcast(m, id); break
+      case 'version':
+        if (m.version && !this.detectedVersion) {
+          this.detectedVersion = m.version
+          this.broadcast({ t: 'version', version: m.version }, id)
+        }
+        break
+      case 'ping': break
+      case 'pos': if (st) { st.pos = m.pos; st.alive = Boolean(m.pos) } this.broadcast(m, id); break
       case 'claim': if (st) st.target = m.target; this.broadcast(m, id); break
       case 'done': if (st) st.done = m.done; this.broadcast(m, id); break
       case 'offline': if (st) { st.alive = false; st.target = null; st.pos = null } this.broadcast(m, id); break
@@ -150,7 +157,7 @@ class Hub {
       const wait = this.lastLogin + this.loginGapMs * (0.8 + Math.random() * 0.7) - Date.now() // never a fixed rhythm
       if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait))
       this.lastLogin = Date.now()
-      this.send(id, { t: 'login-ok' })
+      this.send(id, { t: 'login-ok', version: this.detectedVersion })
     }).catch(() => {})
   }
 

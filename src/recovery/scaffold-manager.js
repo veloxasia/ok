@@ -228,7 +228,7 @@ class ScaffoldManager {
       const pNow = this.bot.entity.position
       const standingOnRef = f.off[1] === 0 && Math.floor(pNow.x) === refPos.x && Math.floor(pNow.z) === refPos.z && Math.abs(pNow.y - (refPos.y + 1)) < 0.45
       if (standingOnRef) {
-        const edgeSpot = new Vec3(refPos.x + 0.5 - f.off[0] * 0.68, refPos.y + 1, refPos.z + 0.5 - f.off[2] * 0.68)
+        const edgeSpot = new Vec3(refPos.x + 0.5 - f.off[0] * 0.60, refPos.y + 1, refPos.z + 0.5 - f.off[2] * 0.60)
         await this.slide(edgeSpot, true).catch(() => {})
       }
       const needSneak = isInteractive(refBlock.name) || standingOnRef

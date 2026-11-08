@@ -748,9 +748,9 @@ class ConstructionEngine {
           }
         }
         if (!this.placer?.activeRun) return
-        const baseWiggle = Number(this.config.navigation?.idleWiggleMs || 3_500)
-        const isComplexPhase = /reference block|support|tower|bridg|scaffold|walking to stand|obstacle/i.test(curPhase)
-        const wiggleAfter = isComplexPhase ? Math.max(8_000, baseWiggle * 2) : Math.max(4_500, baseWiggle)
+        const baseWiggle = Number(this.config.navigation?.idleWiggleMs || 6_000)
+        const isComplexPhase = /reference block|support|tower|bridg|scaffold|walk|getting|shop|restock|obstacle/i.test(curPhase)
+        const wiggleAfter = isComplexPhase ? Math.max(14_000, baseWiggle * 2.5) : Math.max(8_000, baseWiggle)
         if (idle > wiggleAfter && !wiggled) {
           wiggled = true
           Logger.incident('idle-stall', { ...this.snapshot(null, new Error(`no movement or progress for ${Math.round(idle / 1000)}s while: ${curPhase}`)), phase: curPhase })
@@ -794,11 +794,7 @@ class ConstructionEngine {
           if (this.scaffold?.onScaffold?.() && this.scaffold.heightUnderFeet() >= 1) {
             await this.scaffold.descend().catch(() => {})
           }
-          let escaped = await this.escapeIfInTrenchOrPit().catch(() => false)
-          if (!escaped && this.exit) {
-            const res = await this.exit.escape({ why: 'idle pit/pillar watchdog', force: true, maxMs: 10_000 }).catch(() => null)
-            escaped = Boolean(res?.escaped && res?.reason !== 'not trapped')
-          }
+          const escaped = await this.escapeIfInTrenchOrPit().catch(() => false)
           if (!escaped) {
             await this.navigation.unstick().catch(() => {})
           }

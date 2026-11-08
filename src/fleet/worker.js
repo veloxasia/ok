@@ -55,10 +55,12 @@ const dispatch = m => { if (fleet.handler) fleet.handler(m); else fleet.pending.
 
 process.on('message', m => {
   try {
-    if (m.t === 'login-ok') { const r = loginWaiters.shift(); if (r) r(); return }
+    if (m.t === 'version' && m.version && !workerConfig.server.version) { workerConfig.server._detectedVersion = m.version; return }
+    if (m.t === 'login-ok') { if (m.version && !workerConfig.server.version) workerConfig.server._detectedVersion = m.version; const r = loginWaiters.shift(); if (r) r(); return }
     if (m.t === 'say') { fleet.say?.(m.text); return }
     if (m.t === 'cmd') { dispatch(m); return }
     coord.apply(m)
+    if (m.t === 'state' && m.version && !workerConfig.server.version) workerConfig.server._detectedVersion = m.version
     if (m.t === 'state' && m.job) {
       dispatch({
         t: 'cmd',
@@ -75,9 +77,12 @@ process.on('message', m => {
 })
 
 setInterval(() => {
-  if (fleet.currentBot?.entity) fleet.lastOnlineAt = Date.now()
-  coord.beat(id)
-  coord.report()
+  const isOnline = Boolean(fleet.currentBot?.entity && !fleet.currentBot?._client?.ended)
+  if (isOnline) {
+    fleet.lastOnlineAt = Date.now()
+    coord.beat(id)
+    coord.report()
+  }
 }, 500).unref?.()
 // Send IPC heartbeat while the worker process is healthy and not stuck offline for >240s
 setInterval(() => {

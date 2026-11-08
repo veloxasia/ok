@@ -162,28 +162,49 @@ async function main () {
   assert.strictEqual(resWlOk.valid, true)
   console.log(`  [PASS] All ${invalidRejected}/6 invalid placement categories rejected; legal placements accepted.`)
 
-  console.log('\n=== 2. Verifying Side-Face Overhang Guard & Aim Blacklist on incidents.jsonl Cases ===')
-  const shallowAccepted = specAccepts(
-    { faces: [{ f: 'south' }], look: null, horiz: null, tag: 'free' },
-    { f: 'south' },
-    hitClip.minus(eyeClip),
-    hitClip,
-    new Vec3(636, -56, 442),
+  console.log('\n=== 2. Verifying Side-Face Overhang Guard, Upper-Face Hit Selection & Piston Spec Validation ===')
+  // Negative overhang (eye inside top face at x=659.972 for east face at x=660.0) must be rejected
+  const insideTopEye = new Vec3(659.972, -53.38, 470.5)
+  const insideTopHit = new Vec3(660.0, -55.5, 470.5)
+  const insideRejected = specAccepts(
+    { faces: [{ f: 'east' }], look: null, horiz: null, tag: 'free' },
+    { f: 'east' },
+    insideTopHit.minus(insideTopEye),
+    insideTopHit,
+    new Vec3(659, -56, 470),
     true
   )
-  assert.strictEqual(shallowAccepted, false, 'specAccepts must reject frontDist=0.038 from y+1')
+  assert.strictEqual(insideRejected, false, 'specAccepts must reject negative overhang (eye over top face)')
 
-  const properOverhangEye = new Vec3(636.5, -53.73, 443.18)
-  const properOverhangHit = new Vec3(636.5, -55.18, 443.0)
-  const overhangAccepted = specAccepts(
+  // Real Mineflayer 0.58 sneak-edge overhang (frontDist = 0.08) MUST be accepted so deck placements never stall!
+  const realSneakEye = new Vec3(636.5, -53.73, 443.08)
+  const realSneakHit = new Vec3(636.5, -55.18, 443.0)
+  const sneakAccepted = specAccepts(
     { faces: [{ f: 'south' }], look: null, horiz: null, tag: 'free' },
     { f: 'south' },
-    properOverhangHit.minus(properOverhangEye),
-    properOverhangHit,
+    realSneakHit.minus(realSneakEye),
+    realSneakHit,
     new Vec3(636, -56, 442),
     true
   )
-  assert.strictEqual(overhangAccepted, true, 'specAccepts must accept frontDist=0.18 overhang with upper-face sample')
+  assert.strictEqual(sneakAccepted, true, 'specAccepts must accept real 0.58 sneak overhang (frontDist=0.08)')
+
+  // Verify downward piston placed with spec.look = "up" (OPP["down"]) is ACCEPTED by validatePlacement
+  const pistonOk = validatePlacement(
+    new Vec3(636, -42, 442),
+    { name: 'piston', kind: 'block', properties: { facing: 'down', extended: 'false' }, spec: { look: 'up', tag: 'piston-a' } },
+    {
+      eye: new Vec3(636.5, -43.38, 442.5),
+      hit: new Vec3(636.5, -41.0, 442.5),
+      dir: new Vec3(0, 2.38, 0),
+      faceName: 'down',
+      rayHit: { position: new Vec3(636, -41, 442), face: 0 },
+      onGround: true
+    },
+    { refPos: new Vec3(636, -41, 442), refBlock: { name: 'cobblestone', boundingBox: 'block' } },
+    4.5
+  )
+  assert.strictEqual(pistonOk.valid, true, 'validatePlacement must accept downward piston with spec.look=up')
 
   const mockWorld = {
     blocks: new Map(),
@@ -250,8 +271,8 @@ async function main () {
       worldState.blocks.set(t.key, { name: t.name, boundingBox: 'block', position: t.world, getProperties: () => t.properties || {} })
       for (const pl of planners) pl.markCompleted(pl.tasks.get(t.key))
     } else if (t.layer === 8) {
-      const inSePocket = t.world.x >= 666 && t.world.z >= 452
-      if (!inSePocket && l8Done < 670) {
+      const inSePocket = t.world.x >= 670 && t.world.z >= 460
+      if (!inSePocket && l8Done < 712) {
         l8Done++
         worldState.blocks.set(t.key, { name: t.name, boundingBox: 'block', position: t.world, getProperties: () => t.properties || {} })
         for (const pl of planners) pl.markCompleted(pl.tasks.get(t.key))
@@ -428,6 +449,54 @@ async function main () {
   assert(p50 <= 400, `p50 placement time (${p50}ms) must be <= 400ms`)
   assert(p99 <= 1500, `p99 placement time (${p99}ms) must be <= 1500ms`)
   assert(specialP95 <= 2000, `Special block placement time (${specialP95}ms) must be <= 2000ms`)
+
+
+  console.log('\n=== 6. Verifying Custom Bot Counts (1, 2, 3, 5, 6, 7, 9, 11) & Offline Bot Takeover ===')
+  const { isSweeperWorker, builderWorkerIndices } = require('../src/fleet/sweeper')
+  for (const n of [1, 2, 3, 4, 5, 6, 7, 8, 9, 11]) {
+    // 6A: All bots explicitly set to role='builder' -> all N bots must build (even when N=5 or N=8)
+    const allBuilderCfg = {
+      accounts: Array.from({ length: n }, (_, i) => ({ username: `Bot${i + 1}`, role: 'builder', enabled: true })),
+      fleet: { enableSweeperBot: true }
+    }
+    const bIdxAll = builderWorkerIndices(n, allBuilderCfg)
+    assert.strictEqual(bIdxAll.length, n, `When all ${n} accounts have role=builder, all ${n} must be builders`)
+
+    // 6B: Custom Sweeper on a 3-bot fleet (Bot 1 & 2 build, Bot 3 sweeps)
+    if (n === 3) {
+      const customSweeperCfg = {
+        accounts: [
+          { username: 'B1', role: 'builder', enabled: true },
+          { username: 'B2', role: 'builder', enabled: true },
+          { username: 'S1', role: 'sweeper', enabled: true }
+        ],
+        fleet: { enableSweeperBot: true }
+      }
+      const bIdx3 = builderWorkerIndices(3, customSweeperCfg)
+      assert.deepStrictEqual(bIdx3, [0, 1], '3-bot fleet with explicit Sweeper on #3 must assign tasks only to [0, 1]')
+      assert.strictEqual(isSweeperWorker({ index: 2, count: 3 }, customSweeperCfg), true)
+    }
+  }
+
+  // Verify dynamic takeover when 2 out of 5 bots disconnect mid-session
+  const dynCoord = new Coordinator(5)
+  const dynNames = ['Build', 'Buildd', 'Monster', 'Monsterr', 'Sweeper']
+  const dynPlanners = [0, 1, 2, 3].map(idx => {
+    const pl = new BuildPlanner(loaded, transform, worldState, {
+      building: { giveUpAttempts: 6 },
+      fleet: { enabled: true, enableSweeperBot: true }
+    }, silentLogger).build().joinFleet(dynCoord, dynNames[idx], idx, 5)
+    dynCoord.register(dynNames[idx], idx, { entity: { position: new Vec3(620 + idx * 5, -53, 430) } }, 'builder')
+    return pl
+  })
+  // Simulate Monster (idx 2) and Monsterr (idx 3) disconnecting
+  dynCoord.unregister('Monster')
+  dynCoord.unregister('Monsterr')
+  for (const tTask of dynPlanners[0].tasks.values()) {
+    const eff0 = dynPlanners[0].effectiveOwner(tTask)
+    assert(eff0 === 0 || eff0 === 1, `Offline worker task owner ${tTask.owner} must dynamically map to online builders [0, 1], got ${eff0}`)
+  }
+  console.log('  [PASS] Custom bot counts (1..11), explicit Builder/Sweeper roles, and automatic offline-bot takeover verified.')
 
   console.log('\n=== SUMMARY OF VERIFIED METRICS (Deliverable 4) ===')
   console.log(JSON.stringify({

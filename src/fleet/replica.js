@@ -107,7 +107,7 @@ class ReplicaCoordinator extends Coordinator {
         break
       }
       case 'role': { if (m.id === this.selfId) break; const w = this.ensure(m.id); if (m.role) w.role = m.role; break }
-      case 'pos': { if (m.id === this.selfId) break; const w = this.ensure(m.id); w.pos = m.pos; w.beat = Date.now(); break }
+      case 'pos': { if (m.id === this.selfId) break; const w = this.ensure(m.id); w.pos = m.pos; w.beat = m.pos ? Date.now() : 0; break }
       case 'claim': { if (m.id === this.selfId) break; const w = this.ensure(m.id); w.target = m.target ? { ...m.target, at: Date.now() } : null; w.beat = Date.now(); break }
       case 'done': { if (m.id === this.selfId) break; this.ensure(m.id).done = m.done; break }
       case 'offline': { if (m.id === this.selfId) break; const w = this.ensure(m.id); w.beat = 0; w.target = null; w.pos = null; break }

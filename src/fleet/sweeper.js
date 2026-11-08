@@ -30,8 +30,15 @@ function isSweeperWorker (fleetOrIndex, countOrConfig, maybeConfig) {
     ? { index: fleetOrIndex, count: Number(countOrConfig) || 1 }
     : fleetOrIndex
   const config = (typeof fleetOrIndex === 'number') ? maybeConfig : countOrConfig
-  if (!fleet) return false
-  if (config?.account?.role === 'sweeper') return true
+  if (!fleet || fleet.count <= 1) return false
+  const accounts = Array.isArray(config?.accounts) ? config.accounts : []
+  const acc = config?.account || accounts[fleet.index] || null
+  const explicitRole = String(acc?.role || 'auto').toLowerCase()
+  if (explicitRole === 'sweeper') return true
+  if (explicitRole === 'builder') return false
+  if (accounts.some(a => String(a?.role || '').toLowerCase() === 'sweeper')) {
+    return false
+  }
   const explicitIdx = config?.fleet?.sweeperIndex
   if (Number.isInteger(explicitIdx) && explicitIdx >= 0 && explicitIdx < fleet.count) {
     return fleet.index === explicitIdx
@@ -41,17 +48,11 @@ function isSweeperWorker (fleetOrIndex, countOrConfig, maybeConfig) {
 }
 
 function builderWorkerIndices (count, config) {
-  const all = Array.from({ length: count }, (_, i) => i)
-  if (count <= 1) return all
-  const explicitIdx = config?.fleet?.sweeperIndex
-  if (Number.isInteger(explicitIdx) && explicitIdx >= 0 && explicitIdx < count) {
-    const filtered = all.filter(i => i !== explicitIdx)
-    return filtered.length ? filtered : all
-  }
-  if (config?.fleet?.enableSweeperBot !== false && count >= 5) {
-    return all.slice(0, count - 1)
-  }
-  return all
+  const n = Math.max(1, Number(count) || 1)
+  const all = Array.from({ length: n }, (_, i) => i)
+  if (n <= 1) return all
+  const builders = all.filter(i => !isSweeperWorker({ index: i, count: n }, config))
+  return builders.length > 0 ? builders : all
 }
 
 class SweeperEngine {

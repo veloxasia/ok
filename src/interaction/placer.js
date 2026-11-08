@@ -355,7 +355,7 @@ class Placer {
   async hop (stand) {
     const bot = this.bot; const e = bot.entity
     const dist0 = Math.hypot(stand.x - e.position.x, stand.z - e.position.z)
-    if (dist0 > 4.2 || Math.abs(stand.y - e.position.y) > 0.55 || (!e.onGround && this.ground?.state?.() !== 'grounded')) return false
+    if (dist0 > 5.4 || Math.abs(stand.y - e.position.y) > 0.55 || (!e.onGround && this.ground?.state?.() !== 'grounded')) return false
     const y0 = Math.floor(e.position.y + 0.01)
     const startCell = new Vec3(Math.floor(e.position.x), y0, Math.floor(e.position.z))
     const endCell = new Vec3(Math.floor(stand.x), y0, Math.floor(stand.z))
@@ -645,7 +645,7 @@ class Placer {
     this.setPhase('aiming')
     let cur = pose
     const avoid = []; const misses = new Map()
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 4; attempt++) {
       this.check()
       this.aimTries = (this.aimTries || 0) + 1
       await this.look.lookAtPoint(cur.hit)
@@ -662,7 +662,7 @@ class Placer {
         const Fv = VEC[cur.faceName]
         const eNow = this.bot.entity?.position
         if (Fv && (Fv[0] !== 0 || Fv[2] !== 0) && cur.ref && eNow && eNow.y >= cur.ref.y + 0.95 && /ray hit face [01]/.test(this.aim.lastReject || '')) {
-          const overhangSpot = new Vec3(cur.ref.x + 0.5 + Fv[0] * 0.68, eNow.y, cur.ref.z + 0.5 + Fv[2] * 0.68)
+          const overhangSpot = new Vec3(cur.ref.x + 0.5 + Fv[0] * 0.60, eNow.y, cur.ref.z + 0.5 + Fv[2] * 0.60)
           await this.scaffold.slide(overhangSpot, true).catch(() => {})
         } else if (cand) {
           if (cand.edge) await this.scaffold.slide(cand.stand, true).catch(() => {})
@@ -2326,9 +2326,7 @@ class Placer {
         this.experience?.record(`${spec.tag}|${aimed.pose.faceName}|${sneakNow}`, Boolean(settled), eye.distanceTo(hit))
         this.aim?.setReachPenalty?.(this.experience?.reachPenalty?.() || 0)
       } catch { /* learning is best effort */ }
-      if (cand?.edge && cand?.cell) {
-        await this.scaffold.slide(new Vec3(cand.cell.x + 0.5, cand.stand.y, cand.cell.z + 0.5), false).catch(() => {})
-      }
+      // Stay in place after edge placement so adjacent blocks in the same row are placed immediately without re-sliding!
       if (!settled) {
         this.stats.refused++
         throw new BuildError('REFUSED', sendError ? sendError.message : `server did not place ${task.item} at ${key(target)}`)

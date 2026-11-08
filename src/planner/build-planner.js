@@ -541,7 +541,7 @@ class BuildPlanner {
     return out
   }
 
-  build () {
+  build (opts = {}) {
     const start = this.schematic.start()
     const end = this.schematic.end()
     const { schematic } = this
@@ -618,9 +618,109 @@ class BuildPlanner {
     this.computePitCells()
     try { new SchematicIntelligence(this).analyze() } catch {}
     this.orders = [...this.orderGroups.keys()].sort((a, b) => a - b)
-    this.reconcileWorld()
-    this.recomputeReady()
+    if (!opts?.skipWorldReconcile) {
+      this.reconcileWorld()
+      this.recomputeReady()
+    }
     return this
+  }
+
+  async buildAsync (opts = {}) {
+    const yieldLoop = () => new Promise(resolve => setImmediate(resolve))
+    await yieldLoop()
+    return this.build(opts)
+  }
+
+  static cloneFromTemplate (template, worldModel, config, logger) {
+    const p = new BuildPlanner({ schematic: template.schematic }, template.transform, worldModel, config, logger)
+    p.box = template.box ? { ...template.box } : null
+    p.total = template.total
+    p.rotation = template.rotation
+    p.orders = template.orders.slice()
+    p.materialDemand = new Map(template.materialDemand)
+    p.ignored = template.ignored
+    p.census = {
+      ignored: { ...(template.census?.ignored || {}) },
+      skippedAir: template.census?.skippedAir || 0,
+      derived: template.census?.derived || 0,
+      unsupported: (template.census?.unsupported || []).slice(),
+      byKind: { ...(template.census?.byKind || {}) },
+      byPhase: { ...(template.census?.byPhase || {}) },
+      lookUp: template.census?.lookUp || 0
+    }
+    p.tiles = template.tiles
+    p.fluidCells = template.fluidCells
+    p.pitCells = template.pitCells
+    p.reverseNeighbors = template.reverseNeighbors
+    p.chunkTasks = template.chunkTasks
+    p.intelligenceSummary = template.intelligenceSummary
+    p.architectActive = Boolean(template.architectActive)
+
+    const map = new Map()
+    for (const [k, st] of template.tasks.entries()) {
+      const c = { ...st }
+      c.status = 'pending'; c.attempts = 0; c.totalAttempts = 0; c.lastError = null
+      c.deferredUntil = 0; c.anyUntil = 0; c.anyTries = 0; c.priorityBoost = false; c.specTag = null
+      delete c.owner; delete c._fc; delete c.hint; delete c.lockedSpecTag
+      map.set(st, c)
+      p.tasks.set(k, c)
+    }
+    const remap = v => {
+      if (v && typeof v === 'object') {
+        if (map.has(v)) return map.get(v)
+        if (Array.isArray(v) && v.length && map.has(v[0])) return v.map(x => map.get(x) || x)
+      }
+      return v
+    }
+    for (const c of map.values()) {
+      for (const f of Object.keys(c)) { const nv = remap(c[f]); if (nv !== c[f]) c[f] = nv }
+    }
+    const remaining = new Map()
+    for (const c of p.tasks.values()) remaining.set(c.order, (remaining.get(c.order) || 0) + 1)
+    for (const [ord, sg] of template.orderGroups.entries()) {
+      const grp = {}
+      for (const f of Object.keys(sg)) {
+        const v = sg[f]
+        if (f === 'cells') {
+          const cells = new Map()
+          for (const [ck, sset] of v.entries()) {
+            const set = new Set()
+            for (const st of sset) { const mt = map.get(st); if (mt) set.add(mt) }
+            cells.set(ck, set)
+          }
+          grp.cells = cells
+        } else if (v instanceof Map) {
+          const m2 = new Map()
+          for (const [mk, mv] of v.entries()) {
+            if (mv && typeof mv === 'object' && !Array.isArray(mv) && !map.has(mv)) {
+              const o = {}
+              for (const ofk of Object.keys(mv)) o[ofk] = remap(mv[ofk])
+              if (Array.isArray(o.items)) { o.ptr = 0; o.remaining = o.items.length }
+              m2.set(mk, o)
+            } else m2.set(mk, remap(mv))
+          }
+          grp[f] = m2
+        } else if (v instanceof Set) {
+          grp[f] = new Set([...v].map(remap))
+        } else if (Array.isArray(v)) {
+          grp[f] = v.map(x => {
+            if (x && typeof x === 'object' && Array.isArray(x.tasks)) {
+              return { ...x, tasks: x.tasks.map(remap), ptr: 0 }
+            }
+            return remap(x)
+          })
+        } else {
+          grp[f] = remap(v)
+        }
+      }
+      grp.remaining = remaining.get(ord) || 0
+      if ('seqPtr' in grp) grp.seqPtr = 0
+      delete grp.isSingleWorkerChain; delete grp.chainOwner
+      p.orderGroups.set(ord, grp)
+    }
+    p.reconcileWorld()
+    p.recomputeReady()
+    return p
   }
 
   // Detects isolated 1x1 vertical columns of simple full blocks (3+ blocks high with zero horizontal neighbors in `this.tasks`
@@ -1422,20 +1522,9 @@ class BuildPlanner {
                 }
                 orderedL14.push(l14Pool.splice(bestIdx, 1)[0])
               }
-              // Insert each L13 cap leaf immediately after the FIRST ordered L14 block that is cardinally adjacent (|dx|+|dz| === 1) to it!
-              const orderedBlocks = []
-              const remCaps = l13Caps.slice()
-              for (const bt of orderedL14) {
-                orderedBlocks.push(bt)
-                for (let ci = remCaps.length - 1; ci >= 0; ci--) {
-                  const cap = remCaps[ci]
-                  if (Math.abs(cap.world.x - bt.world.x) + Math.abs(cap.world.z - bt.world.z) <= 1) {
-                    orderedBlocks.push(cap)
-                    remCaps.splice(ci, 1)
-                  }
-                }
-              }
-              for (const cap of remCaps) orderedBlocks.push(cap)
+              // Build ALL L14 (y = baseY0 - 1) floor blocks (cobblestone, oak_leaves + #w, black_stained_glass) of the cluster FIRST
+              // so the horizontal deck around every shaft hole is 100% solid before placing the L13 (y = baseY0 - 2) cap leaves from the safe center of the L14 deck!
+              const orderedBlocks = [...orderedL14, ...l13Caps]
               const seq = []
               const addBaseTask = (bt) => {
                 if (!bt || clusteredKeys.has(bt.key)) return
@@ -2508,6 +2597,12 @@ class BuildPlanner {
         return null
       }
     }
+    if (wantReady && botPosition) {
+      const ownCandHere = this.scanGroup(group, botPosition, false, 'own')
+      if (ownCandHere && ownCandHere.world.distanceTo(botPosition) <= 10.0) {
+        return null
+      }
+    }
     const stealTask = this.scanGroup(group, botPosition, wantReady, 'steal')
     if (this.hasOwnDeferredInGroup(group)) {
       const stealDist = (stealTask && botPosition) ? stealTask.world.distanceTo(botPosition) : Infinity
@@ -2526,24 +2621,64 @@ class BuildPlanner {
 
   scanGroup (group, botPosition, wantReady, mode) {
     const now = Date.now()
+    const lp = this._lastPlacedPos
+    const rowContBonus = (t) => {
+      if (!lp || lp.y !== t.world.y) return 0
+      const step = Math.abs(t.world.x - lp.x) + Math.abs(t.world.z - lp.z)
+      return step === 1 ? -24 : (step === 2 ? -10 : 0)
+    }
     if ((group.isVerticalWallBand || group.isModuleClusterBase) && group.clusters) {
       let best = null; let bestScore = Infinity
       for (const cl of group.clusters) {
         while (cl.ptr < cl.tasks.length) { const _ct = cl.tasks[cl.ptr]; if (_ct.status === "completed" || _ct.status === "blocked") { cl.ptr++; continue } if (this.isCorrect(_ct)) { this.markCompleted(_ct); cl.ptr++; continue } break }
         if (cl.ptr >= cl.tasks.length) continue
-        const task = cl.tasks[cl.ptr]
-        if (!this.usable(task, now)) continue
-        if (this.hasDirectlyUnfinishedBelow(task)) continue
-        if (this.enforceColumnGuard && this.hasUnfinishedBelow(task)) continue
-        if (this.lookaheadMode && !this.lookOk(task)) continue
-        if (mode && !this.fleetOk(task, mode, botPosition)) continue
-        if (wantReady && !this.isReady(task)) continue
+        if (cl.ptr === 0 && group.isModuleClusterBase && cl.tasks[0]?.verticalPrevKey) {
+          const prevClTask = this.tasks.get(cl.tasks[0].verticalPrevKey)
+          if (prevClTask && prevClTask.status !== "completed" && prevClTask.status !== "blocked" && (prevClTask.attempts || 0) < 3) {
+            continue
+          }
+        }
+        // For module cluster bases (L13/L14 cobblestone + waterlogged oak_leaves), allow looking up to 8 tasks ahead in the active cluster
+        // so the bot spams all immediately reachable cobblestone/oak_leaves/waterlog tasks in range before moving,
+        // AND if the bot is already inside this active cluster (cl.ptr > 0 && dist <= 8.5), keep working on cl.tasks[cl.ptr] instead of abandoning the cluster to walk 40-72 blocks across the map!
+        const maxLook = group.isModuleClusterBase ? Math.min(cl.tasks.length, cl.ptr + 8) : cl.ptr + 1
+        let chosenInCl = null
+        let chosenInPlace = false
+        let activeUnreadyInCl = null
+        for (let idx = cl.ptr; idx < maxLook; idx++) {
+          const candT = cl.tasks[idx]
+          if (!candT || candT.status === "completed" || candT.status === "blocked") continue
+          if (!this.usable(candT, now)) continue
+          if (this.hasDirectlyUnfinishedBelow(candT)) continue
+          if (this.enforceColumnGuard && this.hasUnfinishedBelow(candT)) continue
+          if (this.lookaheadMode && !this.lookOk(candT)) continue
+          if (mode && !this.fleetOk(candT, mode, botPosition)) continue
+          const dCand = candT.world.distanceTo(botPosition)
+          const readyCand = this.isReady(candT)
+          if (!readyCand) {
+            if (idx === cl.ptr && cl.ptr > 0 && dCand <= 8.5 && !this.lookaheadMode && mode !== "steal") {
+              activeUnreadyInCl = candT
+            }
+            if (wantReady) continue
+          }
+          const inPlaceNow = Boolean(wantReady && !this.lookaheadMode && dCand <= 4.6 && (!this.probe || this.probe(candT)))
+          if (inPlaceNow) {
+            chosenInCl = candT
+            chosenInPlace = true
+            break
+          }
+          if (!chosenInCl) chosenInCl = candT
+          if (!group.isModuleClusterBase) break
+        }
+        if (!chosenInCl && activeUnreadyInCl) chosenInCl = activeUnreadyInCl
+        if (!chosenInCl) continue
+        const task = chosenInCl
         const dist = task.world.distanceTo(botPosition)
         const clusterBonus = cl.ptr > 0 ? -300 : 0
-        if (wantReady && !this.lookaheadMode && cl.ptr > 0 && dist <= 4.7 && (!this.probe || this.probe(task))) {
+        if (chosenInPlace && cl.ptr > 0) {
           return task
         }
-        const score = (task.priorityBoost ? -1000 : 0) + clusterBonus + dist + Math.abs(task.world.y - botPosition.y) * 1.4 + task.attempts * 50 + (task.verticalClusterSeq || 0) * 0.01
+        const score = (task.priorityBoost ? -1000 : 0) + clusterBonus + (chosenInPlace ? -65 : 0) + rowContBonus(task) + dist + Math.abs(task.world.y - botPosition.y) * 1.4 + task.attempts * 50 + (task.verticalClusterSeq || 0) * 0.01
         if (score < bestScore) { bestScore = score; best = task }
       }
       return best
@@ -2568,15 +2703,17 @@ class BuildPlanner {
         if (wantReady && !this.isReady(task)) continue
         if (!wantReady || this.lookaheadMode) return task
         const dist = task.world.distanceTo(botPosition)
-        if (this.probe && scanned === 1 && dist <= 5.0 && mode !== 'steal' && this.probe(task)) return task
+        const isInPlace = Boolean(this.probe && dist <= 4.6 && this.probe(task))
+        if (isInPlace && scanned === 1 && mode !== 'steal') return task
         const localSeq = Math.min(scanned, 16)
-        const inPlaceBonus = (this.probe && dist <= 4.7 && this.probe(task)) ? (scanned <= 12 ? -28 : -18) : 0
+        const inPlaceBonus = isInPlace ? -65 : 0
+        const rcBonus = rowContBonus(task)
         const seqDistCost = mode === 'steal'
           ? dist * 3.0 + localSeq * 0.25 + (dist > 20 ? 120 : 0)
           : (dist <= 6.5
               ? localSeq * 0.45 + dist * 1.8
               : (dist <= 16.0 ? localSeq * 0.45 + dist * 2.8 + 18 : localSeq * 0.35 + dist * 4.2 + 95))
-        const score = (task.priorityBoost ? -1000 : 0) + this.activeClusterBonus(task) + inPlaceBonus + seqDistCost + task.attempts * 40
+        const score = (task.priorityBoost ? -1000 : 0) + this.activeClusterBonus(task) + inPlaceBonus + rcBonus + seqDistCost + task.attempts * 40
         if (score < bestReadyScore) { bestReadyScore = score; bestReady = task }
       }
       if (bestReady) return bestReady
@@ -2600,15 +2737,16 @@ class BuildPlanner {
             if (!this.isReady(task)) continue
             const dist = task.world.distanceTo(botPosition)
             const retreatBonus = Math.min(4, (task.retreatScore || 0) * 0.08)
+            const rcBonus = rowContBonus(task)
             if (task.priorityBoost) {
               if (dist < bestBoostScore) { bestBoostScore = dist; bestBoost = task }
             }
             const clusterBonus = this.activeClusterBonus(task)
             if (this.probe && dist <= 4.7 && this.probe(task) && (!group.isVerticalWallBand || clusterBonus < 0)) {
-              const s = (task.priorityBoost ? -500 : 0) + clusterBonus + dist + task.attempts * 20 - retreatBonus
+              const s = (task.priorityBoost ? -500 : 0) + clusterBonus + rcBonus + dist + task.attempts * 20 - retreatBonus
               if (s < bestInPlaceScore) { bestInPlaceScore = s; bestInPlace = task }
             } else if (dist <= 7.5) {
-              const s = clusterBonus + dist + Math.abs(task.world.y - botPosition.y) * 1.2 + task.attempts * 25 + ((task.verticalClusterSeq ?? task.seq) || 0) * 0.02 - retreatBonus
+              const s = clusterBonus + rcBonus + dist + Math.abs(task.world.y - botPosition.y) * 1.2 + task.attempts * 25 + ((task.verticalClusterSeq ?? task.seq) || 0) * 0.02 - retreatBonus
               if (s < bestLocalReadyScore) { bestLocalReadyScore = s; bestLocalReady = task }
             }
           }
@@ -2969,6 +3107,10 @@ class BuildPlanner {
 
   markCompleted (task) {
     if (task.status === 'completed') return
+    if (task.world && task.kind === 'block') {
+      this._lastPlacedPos = task.world
+      this._lastPlacedOrder = task.order
+    }
     task.deferredUntil = 0
     task.lastError = null
     this.setStatus(task, 'completed')
@@ -3209,6 +3351,14 @@ class BuildPlanner {
   }
 
   // Marks all tasks below minLayer as completed in O(N) (<2ms) so bots continue directly from minLayer upward without touching lower layers
+  fastForwardBelowLayer (minLayer) {
+    return this.skipLayersBelow(minLayer)
+  }
+
+  detectResumeLayer () {
+    return this.autoFastForwardCompletedLayers(null, { detectOnly: true })
+  }
+
   skipLayersBelow (minLayer) {
     const targetLayer = Number(minLayer)
     if (!Number.isFinite(targetLayer) || targetLayer <= 0) return 0
@@ -3240,10 +3390,10 @@ class BuildPlanner {
   // Automatically detects already-built lower layers in the world (or applies explicitStartLayer if provided)
   // so restarting/continuing on a partially built structure immediately resumes at the active upper layer without
   // walking back down to L0..L12 to retry sealed/unloaded lower-layer blocks!
-  autoFastForwardCompletedLayers (explicitStartLayer = null) {
+  autoFastForwardCompletedLayers (explicitStartLayer = null, opts = {}) {
     this.reconcileWorld({ promoteOnly: true })
     if (explicitStartLayer != null && explicitStartLayer !== "" && Number.isFinite(Number(explicitStartLayer)) && Number(explicitStartLayer) > 0) {
-      return this.skipLayersBelow(Number(explicitStartLayer))
+      return opts?.detectOnly ? Number(explicitStartLayer) : this.skipLayersBelow(Number(explicitStartLayer))
     }
     const totalByLayer = new Map()
     const loadedByLayer = new Map()
@@ -3290,7 +3440,7 @@ class BuildPlanner {
       }
     }
     if (autoFloorLayer > 0) {
-      return this.skipLayersBelow(autoFloorLayer)
+      return opts?.detectOnly ? autoFloorLayer : this.skipLayersBelow(autoFloorLayer)
     }
     return 0
   }

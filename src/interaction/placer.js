@@ -129,14 +129,16 @@ class Placer {
     }
     try { return await fn() } finally {
       this._chestSneak = prevChestSneak
-      if (!this._chestSneak) this.setSneak(false)
+      const keepEdgeSneak = Boolean(this._edgeSneakUntil && Date.now() < this._edgeSneakUntil)
+      if (!this._chestSneak && !keepEdgeSneak) this.setSneak(false)
     }
   }
 
   // ---- approach: walk + (maybe) tower, return a pose that really sees the wanted face -----------
   async approach (target, spec, opts = {}) {
     this.setPhase('approach (choosing a stand)')
-    if (!spec.sneak && !this._chestSneak && this.bot.getControlState?.('sneak')) {
+    const inEdgeSneakStreak = Boolean(this._edgeSneakUntil && Date.now() < this._edgeSneakUntil && spec.sneak !== false)
+    if (!spec.sneak && !this._chestSneak && !inEdgeSneakStreak && this.bot.getControlState?.('sneak')) {
       this.setSneak(false)
     }
     if (!opts.fixedStand && !opts.onlyScaffold) {
@@ -152,14 +154,20 @@ class Placer {
       const onlyDownOrSide = Boolean(spec.faces && spec.faces.some(fo => fo.f === 'down') && !spec.faces.some(fo => fo.f === 'up'))
       const minAllowedY = (spec.look === 'up' || onlyDownOrSide || opts.mode === 'self') ? target.y - 5.2 : opts.bucket ? target.y - 1.3 : target.y - 2.1
       if (e.position.y >= minAllowedY) {
-        if (!spec.sneak && this._chestSneak) { this._chestSneak = false; this.setSneak(false) }
-        if (spec.sneak === false) this.setSneak(false)
+        if (!spec.sneak && !inEdgeSneakStreak && this._chestSneak) { this._chestSneak = false; this.setSneak(false) }
+        if (spec.sneak === false) { this._edgeSneakUntil = 0; this.setSneak(false) }
         if (spec.sneak && !this.bot.getControlState('sneak')) { this._chestSneak = true; this.setSneak(true); await nextTick(this.bot) }
         let direct = this.aim.fromPose(target, spec, null, opts)
         if (!direct && spec.sneak) { this._chestSneak = false; this.setSneak(false); direct = null }
         if (direct && spec.noSneakRef) { const rb = this.world.blockAt(direct.ref); if (rb && isInteractive(rb.name)) direct = null }
         if (direct) {
-          return { cand: { stand: e.position.clone(), cell: e.position.floored(), sneak: Boolean(spec.sneak || this.bot.getControlState?.('sneak')), edge: false, scaffold: null, direct: true }, pose: direct }
+          const wantSnk = direct.wantSneak !== undefined ? Boolean(direct.wantSneak) : Boolean(spec.sneak || this.bot.getControlState?.('sneak'))
+          if (wantSnk !== Boolean(this.bot.getControlState?.('sneak'))) {
+            this._chestSneak = wantSnk
+            this.setSneak(wantSnk)
+            await nextTick(this.bot)
+          }
+          return { cand: { stand: e.position.clone(), cell: e.position.floored(), sneak: wantSnk, edge: Boolean(inEdgeSneakStreak && wantSnk), scaffold: null, direct: true }, pose: direct }
         }
       }
     }
@@ -222,9 +230,12 @@ class Placer {
       }
       const botYNow = this.bot?.entity?.position?.y ?? target.y
       const onlyDownOrSideSpec = Boolean(spec.faces && spec.faces.some(fo => fo.f === 'down') && !spec.faces.some(fo => fo.f === 'up'))
-      const filteredCands = (phase === 'stand' && botYNow >= target.y - 1.2 && spec.look !== 'up' && !onlyDownOrSideSpec && candidates.some(c => c.stand.y >= botYNow - 2.2))
-        ? candidates.filter(c => c.stand.y >= botYNow - 2.2)
-        : candidates
+      const hasWalkableTopDeck = phase === 'stand' && spec.look !== 'up' && !onlyDownOrSideSpec && candidates.some(c => c.stand.y >= target.y && c._reachVerdict !== 'no')
+      const filteredCands = hasWalkableTopDeck
+        ? candidates.filter(c => c.stand.y >= target.y - 1)
+        : ((phase === 'stand' && botYNow >= target.y - 1.2 && spec.look !== 'up' && !onlyDownOrSideSpec && candidates.some(c => c.stand.y >= botYNow - 2.2))
+            ? candidates.filter(c => c.stand.y >= botYNow - 2.2)
+            : candidates)
       const topCands = filteredCands.slice(0, 4)
       const walkableCands = filteredCands.filter(c => c._reachVerdict !== 'no').slice(0, 4)
       const rescuePool = (phase === 'stand' && botYNow >= target.y - 1.2 && spec.look !== 'up' && !onlyDownOrSideSpec)
@@ -290,11 +301,13 @@ class Placer {
           if (!allowRescue && /no path|walk timed out|stuck/i.test(error.message || '')) {
             walkOnlyFails++
           }
-          if (/no path|pose lost|stuck|walk timed out/i.test(error.message || '')) {
+          if (/no path|pose lost|stuck|walk timed out|Navigation timeout/i.test(error.message || '')) {
             const walkStand = cand.scaffold?.floor
               ? new Vec3(cand.scaffold.floor.x + 0.5, cand.scaffold.floor.y, cand.scaffold.floor.z + 0.5)
               : (cand.edge && cand.cell ? new Vec3(cand.cell.x + 0.5, cand.stand.y, cand.cell.z + 0.5) : cand.stand)
-            this.noteDeadStand(walkStand)
+            const curPosAfter = this.bot.entity?.position
+            const madeProgress = Boolean(/walk timed out|Navigation timeout/i.test(error.message || '') && curPosAfter && botPos && (botPos.distanceTo(walkStand) - curPosAfter.distanceTo(walkStand) >= 3.0))
+            if (!madeProgress) this.noteDeadStand(walkStand)
           }
           if (cand.scaffold && !this.hasActiveSweeper()) {
             if (cand.scaffold.ledge) {
@@ -441,7 +454,7 @@ class Placer {
           const coast = v * drag / (1 - drag)
           const want = new Set()
           if ((dist > coast + (onIce ? 0.15 : 0.08) || (isGapHop && !jumpedGap)) && !(isGapHop && jumpedGap && dist < 0.45)) {
-            if ((dist > 0.65 || isGapHop) && typeof bot.look === 'function') {
+            if ((dist > 2.15 || isGapHop) && typeof bot.look === 'function') {
               const wantYaw = Math.atan2(-dx, -dz)
               bot.look(wantYaw, bot.entity.pitch, true)
             }
@@ -506,7 +519,7 @@ class Placer {
     } catch { return false }
   }
 
-  hasInPlaceReadyTask (order) {
+  hasInPlaceReadyTask (order, nearDeckRadius = 0) {
     try {
       const grp = this.planner?.orderGroups?.get(order)
       const p = this.bot?.entity?.position
@@ -514,8 +527,11 @@ class Placer {
       for (const set of grp.cells.values()) {
         for (const t of set) {
           if (t.status === 'completed' || t.status === 'blocked') continue
-          if (Math.hypot(t.world.x + 0.5 - p.x, t.world.z + 0.5 - p.z) > 4.4 || Math.abs(t.world.y - p.y) > 3.5) continue
-          if (this.planner.isReady(t) && this.reachableNow(t)) return true
+          const d = Math.hypot(t.world.x + 0.5 - p.x, t.world.z + 0.5 - p.z)
+          if (d > 4.4 || Math.abs(t.world.y - p.y) > 3.5) continue
+          if (!this.planner.isReady(t)) continue
+          if (this.reachableNow(t)) return true
+          if (nearDeckRadius > 0 && d <= nearDeckRadius && Math.abs((t.world.y + 1) - p.y) <= 0.65) return true
         }
       }
       return false
@@ -585,17 +601,44 @@ class Placer {
       if (cand.edge) await this.scaffold.slide(cand.stand)
       return
     }
-    // If `cand.edge` is true, ensure we FIRST walk/hop to `cand.cell` center if not already on `cand.cell`!
-    // Never attempt to sneak-slide across multiple blocks or across a height difference!
+    const fcHere = feetCellOf(this.world, e)
+    const alreadyOnCandCell = Boolean(cand.cell && fcHere.x === cand.cell.x && fcHere.z === cand.cell.z && Math.abs(e.y - cand.stand.y) < 0.35)
+    // Check if the bot can sneak-slide directly along the deck edge from its current cell to cand.stand without detouring to cand.cell center
+    let canDirectEdgeSlide = false
+    if (cand.edge && cand.cell && Math.abs(e.y - cand.stand.y) < 0.35 && Math.hypot(cand.stand.x - e.x, cand.stand.z - e.z) <= 1.85) {
+      const cellDist = Math.abs(fcHere.x - cand.cell.x) + Math.abs(fcHere.z - cand.cell.z)
+      if (cellDist <= 1) {
+        const yDeck = Math.floor(cand.stand.y + 0.01)
+        const f0 = this.world.blockAt(new Vec3(fcHere.x, yDeck - 1, fcHere.z))
+        const f1 = this.world.blockAt(new Vec3(cand.cell.x, yDeck - 1, cand.cell.z))
+        const b1 = this.world.blockAt(new Vec3(cand.cell.x, yDeck, cand.cell.z))
+        const h1 = this.world.blockAt(new Vec3(cand.cell.x, yDeck + 1, cand.cell.z))
+        if (isFullTop(f0) && isFullTop(f1) && isBodyFree(b1) && isBodyFree(h1)) {
+          canDirectEdgeSlide = true
+        }
+      }
+    }
+    if (cand.edge && (alreadyOnCandCell || canDirectEdgeSlide)) {
+      this._edgeSneakUntil = Date.now() + 1800
+      this.setSneak(true)
+      if (cand.hit && this.look?.lookAtPoint) {
+        await this.look.lookAtPoint(cand.hit).catch(() => {})
+      }
+      const canAimHereNow = Boolean(target && spec && this.aim.fromPose(target, spec, null, { ...(opts || {}), strictCurrentSneak: true }))
+      if (!canAimHereNow) {
+        this.setPhase('edge slide')
+        await this.scaffold.slide(cand.stand, true, { target, spec, opts, aim: this.aim })
+      }
+      return
+    }
+    // If `cand.edge` is true and farther than 1 block away, first walk/hop to `cand.cell` center
     const walkGoal = cand.edge && cand.cell ? new Vec3(cand.cell.x + 0.5, cand.stand.y, cand.cell.z + 0.5) : cand.stand
     const hasSubShift = Boolean(!cand.edge && cand.cell && (Math.abs(cand.stand.x - (cand.cell.x + 0.5)) > 0.08 || Math.abs(cand.stand.z - (cand.cell.z + 0.5)) > 0.08))
     const nearTol = cand.edge ? 0.28 : (hasSubShift ? 0.14 : 0.32)
-    const fcHere = feetCellOf(this.world, e)
-    const alreadyOnCandCell = Boolean(cand.cell && fcHere.x === cand.cell.x && fcHere.z === cand.cell.z && Math.abs(e.y - walkGoal.y) < 0.35)
     const dx = Math.abs(e.x - walkGoal.x); const dz = Math.abs(e.z - walkGoal.z)
     const near = dx < nearTol && dz < nearTol && Math.abs(e.y - walkGoal.y) < 0.35
     if (!near && alreadyOnCandCell) {
-      await this.scaffold.slide(walkGoal, Boolean(cand.sneak)).catch(() => {})
+      await this.scaffold.slide(walkGoal, Boolean(cand.sneak), { target, spec, opts, aim: this.aim }).catch(() => {})
     } else if (!near) {
       this._walked = true
       const sameColBelow = Math.floor(walkGoal.x) === Math.floor(e.x) && Math.floor(walkGoal.z) === Math.floor(e.z) && walkGoal.y < e.y - 0.5
@@ -613,7 +656,8 @@ class Placer {
         this.setPhase('walk: pathing')
         const tw = Date.now()
         try {
-          await this.nav.goTo(walkGoal, 0.3, allowRescue ? 6_500 : 3_200, { human: true, work: true, rescue: allowRescue, reachVerdict: cand._reachVerdict })
+          const walkTimeoutMs = Math.min(24_000, Math.max(allowRescue ? 6_500 : 3_800, Math.ceil(hopD * 450) + (allowRescue ? 4_000 : 2_000)))
+          await this.nav.goTo(walkGoal, 0.3, walkTimeoutMs, { human: true, work: true, rescue: allowRescue, reachVerdict: cand._reachVerdict })
         } catch (navErr) {
           const curP = this.bot.entity?.position
           const dyStep = curP ? (walkGoal.y - curP.y) : 99
@@ -633,10 +677,15 @@ class Placer {
     if (st !== 'grounded' && st !== 'resting') { await this.nav.unstick(); st = await this.ground.waitSafe(1200) }
     if (st !== 'grounded' && st !== 'resting') throw new BuildError('NOT_GROUNDED', `bot is ${st} at stand ${key(cand.stand)}`)
     if (cand.edge) {
-      const canAimHere = Boolean(target && spec && this.aim.fromPose(target, spec, null, opts || {}))
+      this._edgeSneakUntil = Date.now() + 1800
+      this.setSneak(true)
+      if (cand.hit && this.look?.lookAtPoint) {
+        await this.look.lookAtPoint(cand.hit).catch(() => {})
+      }
+      const canAimHere = Boolean(target && spec && this.aim.fromPose(target, spec, null, { ...(opts || {}), strictCurrentSneak: true }))
       if (!canAimHere) {
         this.setPhase('edge slide')
-        await this.scaffold.slide(cand.stand, true)
+        await this.scaffold.slide(cand.stand, true, { target, spec, opts, aim: this.aim })
       }
     }
   }
@@ -1275,6 +1324,12 @@ class Placer {
           }
           if (walled4 === 4) return [rk, 3]
         }
+        const belowRk = `${r.x},${r.y - 1},${r.z}`
+        const belowRt = this.planner?.tasks?.get(belowRk)
+        const belowWl = this.planner?.tasks?.get(`${belowRk}#w`)
+        if ((belowRt && belowRt.status !== "completed" && belowRt.status !== "blocked") || (belowWl && belowWl.status !== "completed" && belowWl.status !== "blocked")) {
+          return [rk, 3]
+        }
         const rt = this.planner?.tasks?.get(rk)
         const isInLayerFluidTask = Boolean(rt && rt.kind === "fluid" && rt.order < 88000)
         if (isInLayerFluidTask || (rt && rt.status !== "completed" && (rt.isFluidEnclosure || /(_sign$|_wall_sign$|_hanging_sign$)/.test(rt.name || "")))) return [rk, 2]
@@ -1400,7 +1455,8 @@ class Placer {
         } catch (err) { lastReason = err.message }
       }
       // Under-deck hang support: if R is at the same Y as task.world (e.g. L13 oak_leaves at y=-47) and R_up = R.offset(0, 1, 0)
-      // is already a solid block (e.g. L14 cobblestone at y=-46) with a walkable stand on top of R_up, hang R directly under R_up!
+      // is already a solid block (e.g. L14 cobblestone at y=-46), prefer standing on an OPPOSITE or 90-deg adjacent L14 block around the hole
+      // so the bot hangs R under R_up from across the hole (standingOnRef=false, zero edge slide!) and places+waterlogs task from the safe center (edge=false)!
       if (R.y === task.world.y && this.scaffold?._placeBlockOnFloor) {
         const rUp = R.offset(0, 1, 0)
         const rUpBlock = this.world.blockAt(rUp)
@@ -1408,22 +1464,94 @@ class Placer {
         if (rUpBlock && rUpBlock.boundingBox === 'block' && !isAirLike(rUpBlock) &&
             isBodyFree(this.world.blockAt(rUp.offset(0, 1, 0))) &&
             isBodyFree(this.world.blockAt(rUp.offset(0, 2, 0))) &&
-            isBodyFree(this.world.blockAt(task.world.offset(0, 1, 0))) &&
-            (!this.brain || this.reachVerdict(rUpStand) !== 'no')) {
-          try {
-            const pNow = this.bot?.entity?.position
-            if (pNow && (Math.hypot(pNow.x - rUpStand.x, pNow.z - rUpStand.z) > 1.2 || Math.abs(pNow.y - rUpStand.y) > 0.6)) {
-              if (!(await this.hop(rUpStand).catch(() => false))) {
-                await this.nav.goTo(rUpStand, 0.35, 6_000, { human: true, work: true, rescue: false })
+            isBodyFree(this.world.blockAt(task.world.offset(0, 1, 0)))) {
+          const rxOff = R.x - task.world.x
+          const rzOff = R.z - task.world.z
+          const standCheckOrder = [
+            [-rxOff, -rzOff],
+            [-rzOff, rxOff],
+            [rzOff, -rxOff],
+            [rxOff, rzOff]
+          ]
+          const standCache = new Map()
+          let chosenStandCell = null
+          for (const [sx, sz] of standCheckOrder) {
+            const sc = new Vec3(task.world.x + sx, rUp.y + 1, task.world.z + sz)
+            if (!this.aim.standOk(sc, standCache)) continue
+            const sv = new Vec3(sc.x + 0.5, sc.y, sc.z + 0.5)
+            if (this.brain && this.reachVerdict(sv) === 'no') continue
+            chosenStandCell = sc
+            break
+          }
+          if (chosenStandCell) {
+            const chosenStandVec = new Vec3(chosenStandCell.x + 0.5, chosenStandCell.y, chosenStandCell.z + 0.5)
+            try {
+              const pNow = this.bot?.entity?.position
+              if (pNow && (Math.hypot(pNow.x - chosenStandVec.x, pNow.z - chosenStandVec.z) > 0.65 || Math.abs(pNow.y - chosenStandVec.y) > 0.55)) {
+                if (!(await this.hop(chosenStandVec).catch(() => false))) {
+                  await this.nav.goTo(chosenStandVec, 0.35, 8_000, { human: true, work: true, rescue: false })
+                }
+              }
+              if (await this.scaffold._placeBlockOnFloor(R, true)) {
+                this._reach?.clear(); this.brain?.clearCache?.()
+                task._preferredStand = chosenStandCell
+                this.logger.info(`SUPPORT: hung under-deck reference block at ${key(R)} under ${key(rUp)} (from ${key(chosenStandCell)}) for ${task.name}@${key(task.world)}`)
+                return await finishSupport([R])
+              }
+            } catch (err) { lastReason = err.message }
+          }
+        }
+        // Upper-deck 1-2 step horizontal bridge + under-deck hang (for 3x3 center-chamber L13 oak_leaves where rUp at y=-46 is air):
+        if ((!rUpBlock || isAirLike(rUpBlock)) &&
+            isBodyFree(this.world.blockAt(rUp.offset(0, 1, 0))) &&
+            isBodyFree(this.world.blockAt(rUp.offset(0, 2, 0))) &&
+            isBodyFree(this.world.blockAt(task.world.offset(0, 1, 0)))) {
+          let upperBridgeChain = null
+          if (this.hasSolidNeighbor(rUp, task.world) && hasReachableStandFor(rUp)) {
+            upperBridgeChain = [rUp]
+          } else {
+            for (const [bx, bz] of H) {
+              const B1 = new Vec3(rUp.x + bx, rUp.y, rUp.z + bz)
+              const b1Blk = this.world.blockAt(B1)
+              if (!b1Blk || !isAirLike(b1Blk)) continue
+              if (!isBodyFree(this.world.blockAt(B1.offset(0, 1, 0))) || !isBodyFree(this.world.blockAt(B1.offset(0, 2, 0)))) continue
+              if (this.hasSolidNeighbor(B1, task.world) && hasReachableStandFor(B1)) {
+                upperBridgeChain = [B1, rUp]
+                break
               }
             }
-            if (await this.scaffold._placeBlockOnFloor(R, true)) {
-              this._reach?.clear(); this.brain?.clearCache?.()
-              task._preferredStand = new Vec3(rUp.x, rUp.y + 1, rUp.z)
-              this.logger.info(`SUPPORT: hung under-deck reference block at ${key(R)} under ${key(rUp)} for ${task.name}@${key(task.world)}`)
-              return await finishSupport([R])
+          }
+          if (upperBridgeChain) {
+            const placedUpper = []
+            try {
+              for (const ubCell of upperBridgeChain) {
+                const recU = await this.placeTempBlock(ubCell, { allowScaffold: false, allowEdgeShift: true })
+                if (recU) { recU.isAccessStep = true; recU.isCatwalk = true; this.scaffold.created.set(key(ubCell), recU) }
+                placedUpper.push(ubCell)
+              }
+              const rUpStandNow = new Vec3(rUp.x + 0.5, rUp.y + 1, rUp.z + 0.5)
+              const pNow = this.bot?.entity?.position
+              const eyeDistNow = pNow ? pNow.offset(0, 1.27, 0).distanceTo(new Vec3(rUp.x + 0.5, rUp.y, rUp.z + 0.5)) : 99
+              if (eyeDistNow > 4.2 && pNow) {
+                const stepGoal = placedUpper.length >= 2
+                  ? new Vec3(placedUpper[0].x + 0.5, placedUpper[0].y + 1, placedUpper[0].z + 0.5)
+                  : rUpStandNow
+                if (!(await this.hop(stepGoal).catch(() => false))) {
+                  await this.nav.goTo(stepGoal, 0.35, 6_000, { human: true, work: true, rescue: false }).catch(() => {})
+                }
+              }
+              if (await this.scaffold._placeBlockOnFloor(R, true)) {
+                this._reach?.clear(); this.brain?.clearCache?.()
+                const afterCands = this.aim.candidates(task.world, primarySpec, { allowScaffold: false, allowEdgeShift: true })
+                const bestCenterCand = afterCands.find(c => !c.edge && (!this.brain || this.reachVerdict(c.stand) !== 'no')) || afterCands[0]
+                if (bestCenterCand?.cell) task._preferredStand = bestCenterCand.cell
+                this.logger.info(`SUPPORT: bridged upper-deck ${placedUpper.map(key).join(" -> ")} and hung ${key(R)} for ${task.name}@${key(task.world)}`)
+                return await finishSupport([R, ...placedUpper.reverse()])
+              }
+            } catch (err) {
+              lastReason = err.message
             }
-          } catch (err) { lastReason = err.message }
+          }
         }
       }
       for (const [dx, dz] of H) {
@@ -1562,7 +1690,8 @@ class Placer {
                 this.scaffold.created.set(key(stepCell), rec)
               }
               placedCatwalk.push(stepCell)
-              if (this.bot?.entity?.position && this.bot.entity.position.distanceTo(nextTarget) > 2.1 &&
+              if (this.bot?.entity?.position && this.bot.entity.position.distanceTo(nextTarget) > 3.5 &&
+                  stepCell.y + 1 >= Math.floor(this.bot.entity.position.y - 0.15) &&
                   !stepCell.offset(0, 1, 0).equals(task.world) &&
                   isBodyFree(this.world.blockAt(stepCell.offset(0, 1, 0))) &&
                   isBodyFree(this.world.blockAt(stepCell.offset(0, 2, 0)))) {
@@ -1929,7 +2058,9 @@ class Placer {
     if (task.kind === 'block' && task.info?.specs?.[0]?.look !== 'up') {
       const aboveCell = task.world.offset(0, 1, 0)
       const ak = key(aboveCell)
-      if ((this.scaffold?.created?.has(ak) || this.planner?.isTempCell?.(aboveCell.x, aboveCell.y, aboveCell.z)) && !this.planner?.tasks?.has(ak)) {
+      const aboveTask = this.planner?.tasks?.get(ak)
+      const isTempAbove = this.scaffold?.created?.has(ak) || this.planner?.isTempCell?.(aboveCell.x, aboveCell.y, aboveCell.z)
+      if (isTempAbove && (!aboveTask || aboveTask.kind === 'fluid' || aboveTask.status !== 'completed')) {
         const ab = this.world.blockAt(aboveCell)
         if (ab && !isAirLike(ab) && !this.fluidBeside(aboveCell, true)) {
           await this.digBlock(aboveCell, { allowScaffold: false }).catch(() => {})
@@ -2082,7 +2213,11 @@ class Placer {
         }
         this.logger.debug?.(`${task.name}@${key(task.world)} spec=${spec.tag}: ${error.message}`)
       } finally {
-        this.setSneak(false)
+        const keepEdgeSneak = Boolean(this._edgeSneakUntil && Date.now() < this._edgeSneakUntil && this.hasInPlaceReadyTask(task.order, 2.6))
+        if (!keepEdgeSneak) {
+          this._edgeSneakUntil = 0
+          this.setSneak(false)
+        }
       }
       if (placedWrong) {
         try {
@@ -2308,16 +2443,29 @@ class Placer {
         throw new BuildError('AIM', `placement validator rejected ${task.name}@${key(target)}: [${vCheck.code}] ${vCheck.reason}`)
       }
       this.setPhase('click + server answer')
+      if (cand?.edge || (cand?.sneak && Math.abs((cand.stand?.y ?? 0) - (target.y + 1)) < 0.35)) {
+        this._edgeSneakUntil = Date.now() + 1800
+      }
       let sendError = null
       try {
         await this.interaction.sendPlace(refBlock, aimed.pose.face, aimed.view.cursor)
       } catch (error) { sendError = error }
-      this.materials.noteConsumed?.(task.item, 1)
-
-      const settled = await waitFor(() => {
+      const checkPlaced = () => {
         const b = this.world.blockAt(target)
         return b && (!this.isReplaceable(b) || b.name === task.name) ? b : null
-      }, { timeoutMs: 1200, intervalMs: 10 }).catch(() => null)
+      }
+      let settled = await waitFor(checkPlaced, { timeoutMs: 450, intervalMs: 10 }).catch(() => null)
+      if (!settled && !sendError?.entityObstruction) {
+        this.check()
+        const rbNow = this.world.blockAt(aimed.pose.ref)
+        if (rbNow && !isAirLike(rbNow) && this.bot.heldItem?.name === task.item) {
+          try {
+            await this.interaction.sendPlace(rbNow, aimed.pose.face, aimed.view.cursor)
+          } catch (e2) { if (!sendError) sendError = e2 }
+          settled = await waitFor(checkPlaced, { timeoutMs: 750, intervalMs: 10 }).catch(() => null)
+        }
+      }
+      if (settled) this.materials.noteConsumed?.(task.item, 1)
       try {
         const eye = this.bot.entity.position.offset(0, this.bot.entity.height * 0.9 || 1.6, 0)
         const c = aimed.view.cursor

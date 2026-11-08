@@ -306,6 +306,7 @@ class NavigationController {
     const target = toVec3(position)
     const far = this.bot.entity ? this.bot.entity.position.distanceTo(target) : 0
     if (!options.work) timeoutMs = Math.min(Math.max(timeoutMs, 10_000 + far * 900), 60_000)
+    else if (far > 6) timeoutMs = Math.min(Math.max(timeoutMs, 3_500 + far * 450), 25_000)
     const mode = options.mode === 'access' ? 'access' : 'travel'
     const useHuman = options.human !== false && this.human && mode === 'travel'
     const allowObstacleRecovery = options.allowObstacleBreak !== false && Boolean(this.config.materials?.autoBreakObstructions)

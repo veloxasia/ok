@@ -691,6 +691,11 @@ class AimSolver {
     const batchMemo = new Map()
     const self = opts.mode === 'self'
     const onlyDownOrSide = Boolean(spec.faces && spec.faces.some(fo => fo.f === 'down') && !spec.faces.some(fo => fo.f === 'up'))
+    const hasHorizSameLayerRef = !self && spec.look !== 'up' && !onlyDownOrSide && !opts.bucket && ['north', 'south', 'east', 'west'].some(fn => {
+      if (!spec.faces || !spec.faces.some(fo => fo.f === fn)) return false
+      const fv = VEC[fn]
+      return this.isSolidRef(this.world.blockAt(new Vec3(target.x - fv[0], target.y, target.z - fv[2])), fn)
+    })
     const botAlreadyBelow = Boolean(botFeet && botFeet.y <= target.y - 2.2)
     const minStandY = (spec.look === 'up' || onlyDownOrSide || self || botAlreadyBelow) ? target.y - 5 : opts.bucket ? target.y - 1 : target.y - 2
     for (const faceOpt of spec.faces) {
@@ -739,13 +744,14 @@ class AimSolver {
             let shifts = opts.fixedStand
               ? [[0, 0], [0.19, 0], [-0.19, 0], [0, 0.19], [0, -0.19], [0.25, 0], [-0.25, 0], [0, 0.25], [0, -0.25], [0.18, 0.18], [0.18, -0.18], [-0.18, 0.18], [-0.18, -0.18], [-0.58, 0], [0.58, 0], [0, -0.58], [0, 0.58], [-0.66, 0], [0.66, 0], [0, -0.66], [0, 0.66], [-0.72, 0], [0.72, 0], [0, -0.72], [0, 0.72]]
               : [[0, 0]]
-            if (!opts.fixedStand && (spec.look || spec.horiz || needSneak || opts.allowEdgeShift)) {
+            const isTopDeckBridgeStand = !self && S.y === target.y + 1 && Fv[1] === 0 && spec.look !== 'up' && !onlyDownOrSide
+            if (!opts.fixedStand && (spec.look || spec.horiz || needSneak || opts.allowEdgeShift || isTopDeckBridgeStand)) {
               shifts = [[0, 0], [0.19, 0], [-0.19, 0], [0, 0.19], [0, -0.19], [0.18, 0.18], [0.18, -0.18], [-0.18, 0.18], [-0.18, -0.18]]
               for (const [ux, uz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
                 const nb0 = this.world.blockAt(S.offset(ux, 0, uz)); const nb1 = this.world.blockAt(S.offset(ux, 1, uz))
                 if (isBodyFree(nb0) && isBodyFree(nb1)) {
                   shifts.push([ux * 0.25, uz * 0.25])
-                  if (opts.allowEdgeShift) shifts.push([ux * 0.58, uz * 0.58], [ux * 0.66, uz * 0.66], [ux * 0.72, uz * 0.72])
+                  if (opts.allowEdgeShift || isTopDeckBridgeStand) shifts.push([ux * 0.58, uz * 0.58], [ux * 0.66, uz * 0.66], [ux * 0.72, uz * 0.72])
                 }
               }
             }
@@ -780,7 +786,10 @@ class AimSolver {
                   // Strongly prefer staying on the bot's CURRENT Y level (e.g. flat grass at y=-60 when on grass, or upper deck at y=-56 when on deck)
                   // and penalize unnecessary 2+ block climbs or drops!
                   const dyFromBot = standY - botFeet.y
-                  if (Math.abs(dyFromBot) <= 0.6) {
+                  if (isTopDeckBridgeStand) {
+                    batchBonus -= 14.0
+                    if (Math.abs(dyFromBot) <= 0.6) batchBonus -= 8.5
+                  } else if (Math.abs(dyFromBot) <= 0.6) {
                     batchBonus -= 8.5
                   } else if (dyFromBot > 1.1) {
                     batchBonus += 24.0
@@ -789,11 +798,15 @@ class AimSolver {
                   } else {
                     batchBonus += 2.0
                   }
+                  if (hasHorizSameLayerRef && S.y <= target.y - 2) {
+                    batchBonus += 38.0
+                  }
                   const sk = key(S)
                   let cellScore = batchMemo.get(sk)
                   if (cellScore === undefined) {
                     cellScore = 0
-                    // Anti-fall narrow-wall penalty: penalize climbing onto or perching on a high narrow 1-block wall/pillar
+                    // Anti-fall narrow-wall penalty: penalize climbing onto or perching on a high narrow 1-block wall/pillar,
+                    // EXCEPT when sneak-bridging horizontally on top of the active deck (S.y === target.y + 1), where sneak clamps the bot safely to the edge!
                     let dropSides = 0
                     let deepDropSides = 0
                     for (const [hx, hz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
@@ -805,7 +818,7 @@ class AimSolver {
                         if (!isFullTop(nf3) && !isBottomSlab(nf3)) deepDropSides++
                       }
                     }
-                    if (deepDropSides >= 2 || (dropSides >= 2 && dyFromBot > 0.6)) {
+                    if (!isTopDeckBridgeStand && (deepDropSides >= 2 || (dropSides >= 2 && dyFromBot > 0.6))) {
                       cellScore += (deepDropSides >= 3 || dropSides >= 3) ? 28 : 22
                     }
                     if (!self) {
@@ -830,8 +843,9 @@ class AimSolver {
                   }
                   batchBonus += cellScore
                 }
-                const shiftPenalty = (sx !== 0 || sz !== 0) ? (bigEdge ? 3.5 : 1.25) : 0
-                const cost = crowd + wetPenalty + hazardPenalty + lookUpPenalty + refPenalty + walk + batchBonus + (turn > 1.75 ? 2.5 : turn / 1.57 * 0.6) + (sneak ? 1.5 : 0) + shiftPenalty + order * 0.15 + this.costBias(spec, faceOpt.f, sneak) + (scaffold ? 8 + scaffold.height * 3 + (scaffold.wetBase ? 16 : 0) : 0)
+                const shiftPenalty = (sx !== 0 || sz !== 0) ? (bigEdge ? (isTopDeckBridgeStand ? 0.45 : 3.5) : 1.25) : 0
+                const underOverhangScafPen = (scaffold && hasHorizSameLayerRef && S.y <= target.y) ? 45 : 0
+                const cost = crowd + wetPenalty + hazardPenalty + lookUpPenalty + refPenalty + walk + batchBonus + (turn > 1.75 ? 2.5 : turn / 1.57 * 0.6) + (sneak ? (isTopDeckBridgeStand ? 0.3 : 1.5) : 0) + shiftPenalty + order * 0.15 + this.costBias(spec, faceOpt.f, sneak) + (scaffold ? 8 + scaffold.height * 3 + (scaffold.wetBase ? 16 : 0) + underOverhangScafPen : 0)
                 out.push({ stand: new Vec3(S.x + 0.5 + sx, standY, S.z + 0.5 + sz), cell: S, eye, hit, ref: refPos, face: new Vec3(Fv[0], Fv[1], Fv[2]), faceName: faceOpt.f, faceOpt, sneak, edge, scaffold, cost })
                 found = true
                 break
@@ -899,23 +913,31 @@ class AimSolver {
     if (!self && Math.abs(e.position.x - (target.x + 0.5)) < 0.805 && Math.abs(e.position.z - (target.z + 0.5)) < 0.805 && e.position.y < target.y + 1 && e.position.y + 1.8 > target.y) {
       return null
     }
-    const sneak = Boolean(this.bot.getControlState?.('sneak'))
-    const eye = e.position.offset(0, this.eyeHeight(sneak), 0)
+    const curSneak = Boolean(this.bot.getControlState?.('sneak'))
+    const sneakStates = [curSneak]
+    if (!opts.strictCurrentSneak && spec.sneak !== false && !(curSneak && spec.sneak)) {
+      sneakStates.push(!curSneak)
+    }
     const faces = faceOptIndex == null ? spec.faces : [spec.faces[faceOptIndex]]
-    for (const faceOpt of faces) {
-      if (!self && !opts.ignoreAimBlacklist && this.isAimBlacklisted(target, faceOpt.f, fcNow)) continue
-      const Fv = VEC[faceOpt.f]
-      const selfMode = opts.mode === 'self'
-      const refPos = selfMode ? new Vec3(target.x, target.y, target.z) : new Vec3(target.x - Fv[0], target.y - Fv[1], target.z - Fv[2])
-      const rb = this.world.blockAt(refPos)
-      if (selfMode) { if (!rb || isAirLike(rb)) continue } else if (!this.isSolidRef(rb, faceOpt.f)) continue
-      if (spec.noSneakRef && !selfMode && rb && isInteractive(rb.name)) continue
-      if (opts.bucket && !selfMode && this.isTemp(refPos)) continue
-      if (opts.bucket && !selfMode && rb && WATERLOGGABLE.test(rb.name)) continue
-      const samples = hitSamples(refPos, faceOpt.f, faceOpt, boxOf(rb), Boolean(spec.look || spec.horiz || selfMode), rb && rb.shapes)
-      if (!samples.length) continue
-      const hit = this.pickHit(eye, samples, spec, faceOpt, refPos, opts.avoid, self ? null : target)
-      if (hit) return { turn: turnTo(e.yaw, eye, hit), eye, hit, ref: refPos, face: new Vec3(Fv[0], Fv[1], Fv[2]), faceName: faceOpt.f, faceOpt }
+    for (const sneak of sneakStates) {
+      if (sneak && spec.sneak === false) continue
+      const eye = e.position.offset(0, this.eyeHeight(sneak), 0)
+      for (const faceOpt of faces) {
+        if (!self && !opts.ignoreAimBlacklist && this.isAimBlacklisted(target, faceOpt.f, fcNow)) continue
+        const Fv = VEC[faceOpt.f]
+        const selfMode = opts.mode === 'self'
+        const refPos = selfMode ? new Vec3(target.x, target.y, target.z) : new Vec3(target.x - Fv[0], target.y - Fv[1], target.z - Fv[2])
+        const rb = this.world.blockAt(refPos)
+        if (selfMode) { if (!rb || isAirLike(rb)) continue } else if (!this.isSolidRef(rb, faceOpt.f)) continue
+        if (spec.noSneakRef && !selfMode && rb && isInteractive(rb.name)) continue
+        if (!sneak && !selfMode && rb && isInteractive(rb.name)) continue
+        if (opts.bucket && !selfMode && this.isTemp(refPos)) continue
+        if (opts.bucket && !selfMode && rb && WATERLOGGABLE.test(rb.name)) continue
+        const samples = hitSamples(refPos, faceOpt.f, faceOpt, boxOf(rb), Boolean(spec.look || spec.horiz || selfMode), rb && rb.shapes)
+        if (!samples.length) continue
+        const hit = this.pickHit(eye, samples, spec, faceOpt, refPos, opts.avoid, self ? null : target)
+        if (hit) return { turn: turnTo(e.yaw, eye, hit), eye, hit, ref: refPos, face: new Vec3(Fv[0], Fv[1], Fv[2]), faceName: faceOpt.f, faceOpt, wantSneak: sneak }
+      }
     }
     return null
   }

@@ -128,9 +128,10 @@ async function startFleet (config, createBuilderBot, logger) {
   const names = workerNames(config)
   const stateDir = path.resolve(path.join(__dirname, '..', '..'), config.paths.stateDir)
   const hub = new Hub({ logger, jobFile: path.join(stateDir, 'fleet-job.json'), resume: Boolean(config.server.resumeOnStart), loginGapMs: Number(config.fleet?.joinDelayMs ?? 6000), deadAfterMs: Number(config.fleet?.deadAfterMs ?? 90_000) })
-  const totalRamMb = Math.round(os.totalmem() / 1048576)
+  const totalRamMb = detectContainerRamMb()
   const cpuCount = os.cpus()?.length || 1
-  const perWorkerHeapMb = totalRamMb >= 16384 ? 4096 : (totalRamMb >= 8192 ? 2048 : 1024)
+  const fairShareMb = Math.floor(totalRamMb * 0.8 / Math.max(1, names.length + 1))
+  const perWorkerHeapMb = Math.max(256, Math.min(totalRamMb >= 16384 ? 4096 : (totalRamMb >= 8192 ? 2048 : 1024), fairShareMb))
   logger.info(`Starting ${names.length} builder(s), each in its own process (${names.join(', ')}) on ${cpuCount} vCPU / ${totalRamMb} MB RAM (heap ${perWorkerHeapMb} MB/bot) -> ${config.server.host}:${config.server.port}`)
   if (hub.job) logger.info(`saved job found: ${hub.job.file} at ${hub.job.origin?.x},${hub.job.origin?.y},${hub.job.origin?.z}: the workers resume it by themselves (resume on start is on)`)
   const children = new Map()
@@ -200,3 +201,20 @@ async function startInProcess (config, createBuilderBot, logger) {
 }
 
 module.exports = { startFleet, superviseOne, workerNames, workerConfigFor }
+
+function detectContainerRamMb () {
+  const os = require('os')
+  const fs = require('fs')
+  const hostMb = Math.round(os.totalmem() / 1048576)
+  for (const p of ['/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes']) {
+    try {
+      const raw = fs.readFileSync(p, 'utf8').trim()
+      if (!raw || raw === 'max') continue
+      const bytes = Number(raw)
+      if (Number.isFinite(bytes) && bytes > 0 && bytes < os.totalmem()) {
+        return Math.max(256, Math.round(bytes / 1048576))
+      }
+    } catch {}
+  }
+  return hostMb
+}

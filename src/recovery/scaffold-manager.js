@@ -408,11 +408,16 @@ class ScaffoldManager {
     if (Math.hypot(p0.x - targetX, p0.z - targetZ) <= (onHopper ? 0.08 : 0.14)) return
     if (onHopper) bot.setControlState('sneak', true)
     try {
+      let prevX = p0.x; let prevZ = p0.z
       for (let step = 0; step < 6; step++) {
         checkAbort()
         const q = bot.entity.position
         const dx = targetX - q.x; const dz = targetZ - q.z
         if (Math.hypot(dx, dz) <= (onHopper ? 0.08 : 0.14)) break
+        if (step >= 1 && Math.hypot(q.x - prevX, q.z - prevZ) < 0.002) {
+          bot.entity.yaw = Math.atan2(-dx, -dz)
+        }
+        prevX = q.x; prevZ = q.z
         const fracY = q.y - Math.floor(q.y)
         if (onHopper && fracY > 0.5 && fracY < 0.85) bot.setControlState('jump', true)
         const yaw = bot.entity.yaw
@@ -602,24 +607,34 @@ class ScaffoldManager {
 
   // Fast strafe/step micro-slide WITHOUT rotating the camera away from the target block!
   // Never looks at `spot` or pulses sneak on/off every other tick ("sneak, see ahead, turn back, move back").
-  async slide (spot, keepSneak = false) {
+  async slide (spot, keepSneak = false, earlyAim = null) {
     const bot = this.bot
-    if (bot.__motion && !this._inPrecision) { this._inPrecision = true; try { return await bot.__motion.precisely(() => this.slide(spot, keepSneak)) } finally { this._inPrecision = false } }
+    if (bot.__motion && !this._inPrecision) { this._inPrecision = true; try { return await bot.__motion.precisely(() => this.slide(spot, keepSneak, earlyAim)) } finally { this._inPrecision = false } }
     return withHold(bot, async () => {
       const dist = () => Math.hypot(bot.entity.position.x - spot.x, bot.entity.position.z - spot.z)
       if (dist() < 0.035) {
         if (keepSneak) bot.setControlState('sneak', true)
         return
       }
-      if (dist() > 1.35 || (spot.y !== 0 && Math.abs(bot.entity.position.y - spot.y) > 0.6)) return
+      if (dist() > 1.95 || (spot.y !== 0 && Math.abs(bot.entity.position.y - spot.y) > 0.6)) return
       this._sliding = true
       bot.setControlState('sneak', true)
       try {
-        for (let i = 0; i < 32; i++) {
+        let prevX = bot.entity.position.x
+        let prevZ = bot.entity.position.z
+        for (let i = 0; i < 36; i++) {
           checkAbort()
+          if (earlyAim?.aim && earlyAim?.target && earlyAim?.spec) {
+            const pHit = earlyAim.aim.fromPose(earlyAim.target, earlyAim.spec, null, { ...(earlyAim.opts || {}), strictCurrentSneak: true })
+            if (pHit) break
+          }
           const p = bot.entity.position
           const dx = spot.x - p.x; const dz = spot.z - p.z
           if (Math.hypot(dx, dz) < 0.035) break
+          if (i >= 2 && Math.hypot(p.x - prevX, p.z - prevZ) < 0.002 && !earlyAim) {
+            bot.entity.yaw = Math.atan2(-dx, -dz)
+          }
+          prevX = p.x; prevZ = p.z
           const yaw = bot.entity.yaw
           const fwd = dx * -Math.sin(yaw) + dz * -Math.cos(yaw)
           const right = dx * Math.cos(yaw) + dz * -Math.sin(yaw)

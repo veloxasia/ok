@@ -909,24 +909,49 @@ class ConstructionEngine {
         }
         const pf = this.engine ? this.engine.preflight(task) : { go: true }
         if (!pf.go) { this.engine.defer(task, pf); await sleep(15); continue }
-        const t0 = Date.now()
-        this.recorder?.taskStart(task)
-        await this.placer.executeGuarded(task)
-        this.recorder?.taskEnd(task, Date.now() - t0)
-        this.experience.noteTask(Date.now() - t0)
-        this.logger.info(`OK ${task.name} ${keyOf(task.world)} L${task.layer} ${Date.now() - t0}ms attempt=${task.attempts + 1} [${this.planner.completed.size + 1}/${this.planner.total}]`)
-        if (!this.planner.rescanTask(task)) throw new Error(`world verification failed for ${task.name} at ${keyOf(task.world)}`)
-        this.lastProgressAt = Date.now()
-        this.rounds = 0
-        this.failStreak = 0
-        this.scaffold?.clearChurn?.()
-        await this.maybeSetHome(task)
-        this.actionsSinceSave++
-        this.actionsSinceRescan++
-        if (task.kind === 'fluid' || task.kind === 'waterlog') {
-          this.fluidsSinceClear++
-          if (this.fluidsSinceClear >= 6) { this.fluidsSinceClear = 0; await this.materials.clearEmptyBuckets().catch(() => {}) }
+        for (let spamIdx = 0; spamIdx < 6 && task; spamIdx++) {
+          const t0 = Date.now()
+          this.recorder?.taskStart(task)
+          await this.placer.executeGuarded(task)
+          this.recorder?.taskEnd(task, Date.now() - t0)
+          this.experience.noteTask(Date.now() - t0)
+          this.logger.info(`OK ${task.name} ${keyOf(task.world)} L${task.layer} ${Date.now() - t0}ms attempt=${task.attempts + 1} [${this.planner.completed.size + 1}/${this.planner.total}]`)
+          if (!this.planner.rescanTask(task)) throw new Error(`world verification failed for ${task.name} at ${keyOf(task.world)}`)
+          this.lastProgressAt = Date.now()
+          this.rounds = 0
+          this.failStreak = 0
+          this.scaffold?.clearChurn?.()
+          this.actionsSinceSave++
+          this.actionsSinceRescan++
+          if (task.kind === 'fluid' || task.kind === 'waterlog') {
+            this.fluidsSinceClear++
+            if (this.fluidsSinceClear >= 6) { this.fluidsSinceClear = 0; await this.materials.clearEmptyBuckets().catch(() => {}) }
+          }
+          if (!this.running || this.stopRequested || this.paused || this.bot._client?.ended || !this.bot.entity) break
+          if (fleet) { fleet.coord.release(fleet.id); fleet.coord.beat(fleet.id) }
+          // Tight in-range spam continuation: if another ready task in the same order is immediately placeable from the current pose (or within a 1-block edge slide), chain it immediately!
+          if (!this.placer.hasInPlaceReadyTask(task.order, 1.85)) break
+          const nextSpam = this.planner.next(this.bot.entity.position)
+          if (!nextSpam) break
+          if (nextSpam.order >= 100000 && this.config.building.pauseBeforePower && !this.powerAsked) {
+            nextSpam.status = 'pending'
+            if (fleet) fleet.coord.release(fleet.id)
+            break
+          }
+          if (!this.world.blockAt(nextSpam.world)) {
+            nextSpam.status = 'pending'
+            if (fleet) fleet.coord.release(fleet.id)
+            break
+          }
+          const pfNext = this.engine ? this.engine.preflight(nextSpam) : { go: true }
+          if (!pfNext.go) {
+            this.engine.defer(nextSpam, pfNext)
+            if (fleet) fleet.coord.release(fleet.id)
+            break
+          }
+          task = nextSpam
         }
+        await this.maybeSetHome(task)
       } catch (error) {
         this.lastError = error
         if (error.code === 'MATERIAL_SUBSTITUTUTED' || error.code === 'MATERIAL_SUBSTITUTED') { this.logger.info(error.message); continue }

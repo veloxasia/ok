@@ -194,6 +194,7 @@ class ConstructionEngine {
           return await dig(block, ...rest)
         } finally {
           try {
+            this.placer?.invalidateWorldCaches?.()
             if (pos && this.planner) {
               const t = this.planner.tasks.get(`${pos.x},${pos.y},${pos.z}`)
               if (t && t.status === 'completed') this.planner.reopenTask(pos, this.fleet?.index, { forceReset: true })
@@ -837,7 +838,7 @@ class ConstructionEngine {
       const pos = this.bot.entity.position
       if (this.planner.quarantined?.size > 0 && Date.now() - (this._lastQuarantineCheckAt || 0) > 20_000) {
         this._lastQuarantineCheckAt = Date.now()
-        const revivedQ = this.planner.revive({ includeQuarantined: false, includeExpiredQuarantined: true })
+        const revivedQ = this.planner.revive({ includeQuarantined: false, includeExpiredQuarantined: true, onlyQuarantined: true })
         if (revivedQ > 0) this.logger.info(`QUARANTINE-REVIVE: reopened ${revivedQ} lower-layer straggler task(s) after cooldown`)
       }
       let task = this.planner.next(pos)

@@ -182,10 +182,7 @@ class Placer {
     for (const phase of ['stand', 'tower']) {
       if (phase === 'tower' && (opts.allowScaffold === false || this.config.building?.allowTemporaryScaffolding === false)) break
       const searchOpts = { ...opts, max: 8, exclude: tried, ...(phase === 'tower' ? { onlyScaffold: true } : {}) }
-      const prewarmed = (phase === 'stand' && tried.size === 0 && !opts.fixedStand && !opts.onlyScaffold)
-        ? this.lookahead?.getCachedCandidates?.(target, spec)
-        : null
-      const candidates = (prewarmed && prewarmed.length) ? prewarmed.map(c => ({ ...c })) : this.aim.candidates(target, spec, searchOpts)
+      const candidates = this.aim.candidates(target, spec, searchOpts)
       for (const c of candidates) c.task = opts.hintTask || this.currentTask || null
       if (phase === 'stand' && opts.hintTask?._preferredStand) {
         const ps = opts.hintTask._preferredStand
@@ -286,7 +283,8 @@ class Placer {
           const hs = (this.hopStats = this.hopStats || { hops: 0, hopMs: 0, walks: 0, walkMs: 0, walkDist: 0 }); hs.p0 = (hs.p0 || 0) + (pose ? 0 : 1)
           if (!pose) { const tb = Date.now(); await this.settleBody(); hs.settleMs = (hs.settleMs || 0) + Date.now() - tb; pose = this.aim.fromPose(target, spec, null, opts) }
           if (!pose) { const tc = Date.now(); await this.settleOnStand(cand, target, spec, opts); hs.creepMs = (hs.creepMs || 0) + Date.now() - tc; hs.p1 = (hs.p1 || 0) + 1; pose = this.aim.fromPose(target, spec, null, opts) }
-          if (!pose && spec.sneak !== false) {
+          const overhangingHere = Boolean(cand.edge || (this.bot.entity?.onGround && this.bot.builder?.fallGuard && !this.bot.builder.fallGuard.floorWithin(this.bot.entity.position.x, this.bot.entity.position.y, this.bot.entity.position.z, 0)))
+          if (!pose && spec.sneak !== false && !overhangingHere) {
             const altSneak = !this.bot.getControlState('sneak')
             this.setSneak(altSneak)
             await sleep(8)
@@ -296,6 +294,12 @@ class Placer {
           if (!pose) throw new BuildError('NO_ACCESS', `pose lost at ${key(cand.stand)}`)
           return { cand, pose }
         } catch (error) {
+          if (cand.edge && cand.cell && this.bot.entity?.position && this.bot.entity.onGround) {
+            const ep = this.bot.entity.position
+            if (Math.floor(ep.x) !== cand.cell.x || Math.floor(ep.z) !== cand.cell.z) {
+              await this.scaffold.slide(new Vec3(cand.cell.x + 0.5, cand.stand.y, cand.cell.z + 0.5), true).catch(() => {})
+            }
+          }
           if (error.code === 'INTERRUPTED' || error.code === 'TASK_TIMEOUT' || /abort|interrupt|abandoned/i.test(error.message)) throw error
           lastError = error
           if (!allowRescue && /no path|walk timed out|stuck/i.test(error.message || '')) {
@@ -322,6 +326,17 @@ class Placer {
     throw new BuildError('NO_ACCESS', `no physical access to ${key(target)}${lastError ? ` (${lastError.message})` : ''}`)
   }
 
+  invalidateWorldCaches () {
+    this._reach?.clear?.()
+    this.brain?.clearCache?.()
+    this.lookahead?.candCache?.clear?.()
+    const fg = this.bot?.builder?.fallGuard
+    if (fg) {
+      fg._nhCache = null
+      fg.returnCache?.clear?.()
+    }
+  }
+
   deadStandKey (stand) {
     const p = this.bot?.entity?.position
     if (!p || !stand) return null
@@ -334,7 +349,7 @@ class Placer {
     if (!dk) return false
     const at = this._deadStands.get(dk)
     if (!at) return false
-    if (Date.now() - at > 20_000) {
+    if (Date.now() - at > 8_000) {
       this._deadStands.delete(dk)
       return false
     }
@@ -357,7 +372,7 @@ class Placer {
     if (this.isDeadStand(stand)) return 'no'
     const k = this.deadStandKey(stand) || `${Math.floor(stand.x)},${Math.floor(stand.y)},${Math.floor(stand.z)}`
     const hit = this._reach.get(k)
-    if (hit && Date.now() - hit.at < 8_000) return hit.v
+    if (hit && Date.now() - hit.at < 1_500) return hit.v
     if (this._reach.size > 600) this._reach.clear()
     let v = 'unknown'
     try { v = this.brain.reachability(stand, 2400, false).verdict } catch { /* best effort */ }
@@ -640,6 +655,12 @@ class Placer {
     if (!near && alreadyOnCandCell) {
       await this.scaffold.slide(walkGoal, Boolean(cand.sneak), { target, spec, opts, aim: this.aim }).catch(() => {})
     } else if (!near) {
+      if (this.bot.entity?.onGround && (Math.floor(e.x) !== fcHere.x || Math.floor(e.z) !== fcHere.z)) {
+        const rawUnder = this.world.blockAt(new Vec3(Math.floor(e.x), Math.floor(e.y + 0.01) - 1, Math.floor(e.z)))
+        if (!isFullTop(rawUnder)) {
+          await this.scaffold.slide(new Vec3(fcHere.x + 0.5, e.y, fcHere.z + 0.5), true).catch(() => {})
+        }
+      }
       this._walked = true
       const sameColBelow = Math.floor(walkGoal.x) === Math.floor(e.x) && Math.floor(walkGoal.z) === Math.floor(e.z) && walkGoal.y < e.y - 0.5
       if (this.scaffold.onScaffold() && (sameColBelow || (!this.hasActiveSweeper() && !this.scaffold.contains(walkGoal.offset(0, -1, 0)) && (walkGoal.y < e.y - 1.0 || Math.hypot(walkGoal.x - e.x, walkGoal.z - e.z) > 1.85)))) {
@@ -764,7 +785,7 @@ class Placer {
       }
       throw digErr
     }
-    this._reach?.clear(); this.brain?.clearCache?.()
+    this.invalidateWorldCaches()
     this.stats.dug++
   }
 
@@ -857,7 +878,7 @@ class Placer {
         const aimed = await this.aimAndValidate(target, FREE, pose, { mode: 'self' })
         await this.interaction.digAimed(this.world.blockAt(target), FACE_INDEX[aimed.pose.faceName])
         sc.created.delete(key(target))
-        this._reach?.clear(); this.brain?.clearCache?.()
+        this.invalidateWorldCaches()
         this.stats.dug++
         broke++
         this.logger.info(`TIDY: broke temporary ${key(target)} from ${key(here.floored())} (${sc.created.size} left)`)
@@ -1038,7 +1059,7 @@ class Placer {
       rec.createdAt = Date.now()
       this.scaffold.created.set(key(cell), rec)
       this.planner?.fleet?.coord?.addTempBlock?.(rec, this.planner?.fleet?.id)
-      this._reach?.clear(); this.brain?.clearCache?.()
+      this.invalidateWorldCaches()
       return rec
     } finally {
       this._tempDepth = Math.max(0, (this._tempDepth || 1) - 1)
@@ -1253,12 +1274,12 @@ class Placer {
     const V = { up: [0, 1, 0], down: [0, -1, 0], north: [0, 0, -1], south: [0, 0, 1], west: [-1, 0, 0], east: [1, 0, 0] }
     // If the bot is currently on a disconnected roof/island from `task.world` (every walkable stand within 2m of `task.world` has `reachVerdict === "no"`),
     // connect to the target region ONCE upfront (e.g. via Ender Pearl from a vantage rim) before evaluating local support blocks!
-    if (this.brain && this.bot?.entity?.position && this.bot.entity.position.distanceTo(task.world) > 6.5) {
+    if (this.brain && this.bot?.entity?.position && this.bot.entity.position.distanceTo(task.world) > 2.2) {
       const standCache = new Map()
       const localStands = []
       for (let dy = -1; dy <= 2; dy++) {
-        for (let dx = -6; dx <= 6; dx++) {
-          for (let dz = -6; dz <= 6; dz++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          for (let dz = -2; dz <= 2; dz++) {
             const sc = new Vec3(task.world.x + dx, task.world.y + dy, task.world.z + dz)
             if (sc.equals(task.world)) continue
             if (this.aim.standOk(sc, standCache) && !this.aim.isHazard(sc)) {
@@ -1272,9 +1293,9 @@ class Placer {
         localStands.sort((a, b) => Math.hypot(a.x - bp.x, a.z - bp.z) - Math.hypot(b.x - bp.x, b.z - bp.z))
         const targetStand = localStands[0]
         const prep = await this.brain.prepare(targetStand, { force: true }).catch(() => 'no')
-        this._reach?.clear()
-        this.brain?.clearCache?.()
-        if (prep === 'no' && this.reachVerdict(targetStand) === 'no') {
+        this.invalidateWorldCaches()
+        this.setPhase('providing a reference block (support)')
+        if (prep === 'no' && this.reachVerdict(targetStand) === 'no' && this.bot.entity.position.distanceTo(task.world) > 6.5) {
           throw new BuildError('NO_ACCESS', `no physical access to region around ${key(task.world)}`)
         }
       }
@@ -1414,7 +1435,18 @@ class Placer {
       return placedRefs
     }
     const fragileOccupied = []
+    const reachStandMemo = new Map()
+    const hasReachableStandFor = (cell) => {
+      const ck = key(cell)
+      if (reachStandMemo.has(ck)) return reachStandMemo.get(ck)
+      const cs = this.aim.candidates(cell, FREE, { allowScaffold: false, allowEdgeShift: true, max: 6 })
+      const ok = cs.some(c => !this.brain || this.reachVerdict(this.walkStandOf(c)) !== 'no')
+      reachStandMemo.set(ck, ok)
+      return ok
+    }
     for (const R of options) {
+      this.check()
+      this.setPhase('providing a reference block (support)')
       await new Promise(resolve => setImmediate(resolve))
       if (primarySpec?.look !== 'up' && R.y > task.world.y && this.hasRef(task, primarySpec) && task.attempts < 2) continue
       const rTask = this.planner?.tasks?.get(key(R))
@@ -1433,10 +1465,6 @@ class Placer {
         lastReason = `reference cell ${key(R)} is occupied by ${rb ? rb.name : 'unloaded'}`
         if (rb && rTask && rTask.info?.fragile && !CONTAINERS.test(rb.name) && !/^(repeater|comparator)$/.test(rb.name)) fragileOccupied.push({ R, rb, rTask })
         continue
-      }
-      const hasReachableStandFor = (cell) => {
-        const cs = this.aim.candidates(cell, FREE, { allowScaffold: false, allowEdgeShift: true, max: 8 })
-        return cs.some(c => !this.brain || this.reachVerdict(this.walkStandOf(c)) !== 'no')
       }
       const simR = evalSimR(R)
       if (!simR && (this.hasSolidNeighbor(task.world) || this.hasSolidNeighbor(R, task.world))) {
@@ -1493,7 +1521,7 @@ class Placer {
                 }
               }
               if (await this.scaffold._placeBlockOnFloor(R, true)) {
-                this._reach?.clear(); this.brain?.clearCache?.()
+                this.invalidateWorldCaches()
                 task._preferredStand = chosenStandCell
                 this.logger.info(`SUPPORT: hung under-deck reference block at ${key(R)} under ${key(rUp)} (from ${key(chosenStandCell)}) for ${task.name}@${key(task.world)}`)
                 return await finishSupport([R])
@@ -1541,7 +1569,7 @@ class Placer {
                 }
               }
               if (await this.scaffold._placeBlockOnFloor(R, true)) {
-                this._reach?.clear(); this.brain?.clearCache?.()
+                this.invalidateWorldCaches()
                 const afterCands = this.aim.candidates(task.world, primarySpec, { allowScaffold: false, allowEdgeShift: true })
                 const bestCenterCand = afterCands.find(c => !c.edge && (!this.brain || this.reachVerdict(c.stand) !== 'no')) || afterCands[0]
                 if (bestCenterCand?.cell) task._preferredStand = bestCenterCand.cell
@@ -1625,7 +1653,9 @@ class Placer {
           if (foundChain) break
           const qBridge = [{ cell: R, path: [R] }]
           const seenBridge = new Set([key(R), key(task.world)])
-          for (let qi = 0; qi < qBridge.length && qBridge.length < 400; qi++) {
+          for (let qi = 0; qi < qBridge.length && qBridge.length < 48; qi++) {
+            this.check()
+            if ((qi & 7) === 7) await new Promise(resolve => setImmediate(resolve))
             const cur = qBridge[qi]
             if (cur.path.length >= 2 && this.hasSolidNeighbor(cur.cell, task.world) && hasReachableStandFor(cur.cell)) {
               const candidateChain = cur.path.slice().reverse()
@@ -1634,7 +1664,7 @@ class Placer {
                 break
               }
             }
-            if (cur.path.length >= 9) continue
+            if (cur.path.length >= 5) continue
             for (const [bdx, bdy, bdz] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0], [0, 1, 0]]) {
               const nc = new Vec3(cur.cell.x + bdx, cur.cell.y + bdy, cur.cell.z + bdz)
               if (Math.abs(nc.y - task.world.y) > 1 || Math.abs(nc.x - R.x) + Math.abs(nc.z - R.z) > 9) continue
@@ -1680,7 +1710,7 @@ class Placer {
               if (this.scaffold?._placeBlockOnFloor && await this.scaffold._placeBlockOnFloor(stepCell, true).catch(() => false)) {
                 rec = this.scaffold.created.get(key(stepCell)) || stepCell.clone()
                 rec.createdAt = Date.now()
-                this._reach?.clear(); this.brain?.clearCache?.()
+                this.invalidateWorldCaches()
               } else {
                 rec = await this.placeTempBlock(stepCell, { allowScaffold: false, allowEdgeShift: true })
               }
@@ -2027,7 +2057,7 @@ class Placer {
       }
       if (!ok) throw new BuildError("REFUSED", `self-pillar placement of ${task.item} at ${key(tPos)} was not accepted`)
       this.materials.noteConsumed?.(task.item, 1)
-      this._reach?.clear(); this.brain?.clearCache?.()
+      this.invalidateWorldCaches()
       this.stats.placed++
       this.learner.success(task, "free")
       if (this.bot.entity) {
@@ -2479,7 +2509,7 @@ class Placer {
         this.stats.refused++
         throw new BuildError('REFUSED', sendError ? sendError.message : `server did not place ${task.item} at ${key(target)}`)
       }
-      this._reach?.clear(); this.brain?.clearCache?.()
+      this.invalidateWorldCaches()
       this.stats.placed++
       if (matches(settled, task.info, { ignore: this.postKeys(task) })) return 'ok'
       if (settled.name === task.name && task.info.soft.length) {

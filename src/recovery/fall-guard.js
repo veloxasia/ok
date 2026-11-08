@@ -288,9 +288,15 @@ class FallGuard {
   tick () {
     const bot = this.bot; const e = bot.entity
     if (!e || !bot.builder?.running || bot.health <= 0) return
+    const keepPlacerSneak = Boolean(
+      bot.builder?.placer?._chestSneak ||
+      (bot.builder?.placer?._edgeSneakUntil && Date.now() < bot.builder.placer._edgeSneakUntil) ||
+      bot.builder?.scaffold?._sliding ||
+      (e.onGround && !this.floorWithin(e.position.x, e.position.y, e.position.z, 0))
+    )
     if (holdOf(bot) > 0) {
       this.falling = null
-      if (this.sneakClampTicks > 0) { this.sneakClampTicks = 0; if (!bot.builder?.placer?._chestSneak) bot.setControlState('sneak', false) }
+      if (this.sneakClampTicks > 0) { this.sneakClampTicks = 0; if (!keepPlacerSneak) bot.setControlState('sneak', false) }
       return
     }
     const fx0 = Math.floor(e.position.x); const fy0 = Math.floor(e.position.y + 0.01); const fz0 = Math.floor(e.position.z)
@@ -311,7 +317,7 @@ class FallGuard {
         bot.setControlState('sneak', true)
       } else {
         this.sneakClampTicks = 0
-        if (!bot.builder?.placer?._chestSneak) bot.setControlState('sneak', false)
+        if (!keepPlacerSneak) bot.setControlState('sneak', false)
       }
     }
 

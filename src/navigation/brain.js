@@ -422,6 +422,7 @@ class Brain {
 
   clearCache () {
     this._forwardCacheMap?.clear?.()
+    this.failed?.clear?.()
   }
 
   isBlockedCell (x, y, z) {
@@ -437,9 +438,9 @@ class Brain {
   getForwardReach (me, effDrop, blockedFn) {
     const now = Date.now()
     this._forwardCacheMap = this._forwardCacheMap || new Map()
-    const ck = `${me.x},${me.y},${me.z}:${effDrop}`
+    const ck = `${me.x},${me.y},${me.z}:${effDrop}:${blockedFn ? 1 : 0}`
     const cached = this._forwardCacheMap.get(ck)
-    if (cached && now - cached.at < 2500) {
+    if (cached && now - cached.at < 1200) {
       return cached
     }
     if (this._forwardCacheMap.size > 8) this._forwardCacheMap.clear()
@@ -555,16 +556,20 @@ class Brain {
     if (!bot?.entity) return false
     const wasOnScaffold = Boolean(this.scaffold?.onScaffold?.())
     if (wasOnScaffold) await this.scaffold?.descend?.().catch(() => {})
-    const key = `${Math.floor(stand.x)},${Math.floor(stand.y)},${Math.floor(stand.z)}`
-    if ((this.failed.get(key) || 0) >= 3) return false
     await new Promise(r => setImmediate(r))
     const from = bot.entity.position
     const me = feetCellOf(this.world, from)
+    const key = `${me.x},${me.y},${me.z}->${Math.floor(stand.x)},${Math.floor(stand.y)},${Math.floor(stand.z)}`
+    if (this.failed.size > 120) this.failed.clear()
+    const failRec = this.failed.get(key)
+    if (failRec) {
+      if (Date.now() - failRec.at > 15_000) this.failed.delete(key)
+      else if (failRec.count >= 3) return false
+    }
     const underFeetTask = this.bot?.builder?.planner?.tasks?.get(`${me.x},${me.y - 1},${me.z}`)
     const onIsolatedCol = Boolean(underFeetTask?.isolatedColumn || underFeetTask?.verticalAnchorCol || wasOnScaffold || this.scaffold?.onScaffold?.())
     // Never pearl or dig downward off an elevated deck/roof (`me.y >= stand.y + 3`) unless descending a finished isolated/scaffold column!
     if (me.y >= Math.floor(stand.y) + 3 && !onIsolatedCol) {
-      this.failed.set(key, (this.failed.get(key) || 0) + 1)
       return false
     }
     const b = boundsOf(region.cells, 48)
@@ -776,7 +781,8 @@ class Brain {
         }
       } catch (error) { if (error.code === 'INTERRUPTED' || error.code === 'TASK_TIMEOUT' || /abort|interrupt|abandoned/i.test(error.message)) throw error; this.logger.warn(`brain: exit failed: ${error.message}`) }
     }
-    this.failed.set(key, (this.failed.get(key) || 0) + 1)
+    const prevFail = this.failed.get(key)?.count || 0
+    this.failed.set(key, { count: prevFail + 1, at: Date.now() })
     return false
   }
 

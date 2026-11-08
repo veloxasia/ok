@@ -1015,6 +1015,7 @@ class BuildPlanner {
     const hasSolidFloorAt = (x, y, z) => {
       const bt = this.tasks.get(`${x},${y},${z}`)
       if (bt && bt.kind === "block" && !bt.info?.fragile && !SUNKEN.test(bt.name || "")) return true
+      if (this.box && y >= this.box.y0) return false
       const wb = this.world?.blockAt?.({ x, y, z })
       return Boolean(wb && wb.boundingBox === "block")
     }
@@ -1447,158 +1448,33 @@ class BuildPlanner {
         if (extractedGeneratorSubBand && l0 >= 3 && !this.tasks.get(`${multiLayerCols[0].x},${baseY0 - 1},${multiLayerCols[0].z}`)?.verticalColumn) {
           const lBase = l0 - 1
           const lCap = l0 - 2
-          const baseModuleOrder = +(lBase * 4 + 0.10).toFixed(2)
+          const baseFloorOrder = +(lBase * 4 + 0.08).toFixed(2)
+          const capLeavesOrder = +(lBase * 4 + 0.12).toFixed(2)
           const lBaseGenSet = new Set()
           for (const col of multiLayerCols) {
             const bt = this.tasks.get(`${col.x},${baseY0 - 1},${col.z}`)
             if (bt && bt.kind === "block" && bt.layer === lBase) {
-              this.moveTaskToOrder(bt, baseModuleOrder)
+              this.moveTaskToOrder(bt, baseFloorOrder)
               lBaseGenSet.add(bt.key)
               const bwl = this.tasks.get(`${bt.key}#w`)
-              if (bwl) this.moveTaskToOrder(bwl, baseModuleOrder)
+              if (bwl) this.moveTaskToOrder(bwl, baseFloorOrder)
             }
           }
           if (lBaseGenSet.size >= 24) {
-            const capLeavesByAnchor = new Map(selectedAnchors.map(a => [a.ck, []]))
+            const baseFloorGrp = this.orderGroups.get(baseFloorOrder)
+            if (baseFloorGrp) baseFloorGrp.hasDependentCapOrder = true
             for (const t of this.tasks.values()) {
               if (t.layer !== lCap || t.kind !== "block" || !t.info?.waterlogged) continue
               if (hasSolidFloorAt(t.world.x, t.world.y - 1, t.world.z)) continue
-              this.moveTaskToOrder(t, baseModuleOrder)
+              this.moveTaskToOrder(t, capLeavesOrder)
               const twl = this.tasks.get(`${t.key}#w`)
-              if (twl) this.moveTaskToOrder(twl, baseModuleOrder)
+              if (twl) this.moveTaskToOrder(twl, capLeavesOrder)
               const altKeys = []
               for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
                 const adjK = `${t.world.x + dx},${t.world.y + 1},${t.world.z + dz}`
                 if (lBaseGenSet.has(adjK)) altKeys.push(adjK)
               }
               if (altKeys.length) t.altBridgeAnchorKeys = altKeys
-              let bestA = null; let bestD = Infinity
-              for (const a of selectedAnchors) {
-                const d = Math.hypot(t.world.x - a.x, t.world.z - a.z)
-                if (d < bestD) { bestD = d; bestA = a }
-              }
-              if (bestA) capLeavesByAnchor.get(bestA.ck).push(t)
-            }
-            const baseClusterLists = []
-            const allBaseClusterTasks = []
-            const clusteredKeys = new Set()
-            let baseSeqIdx = 0
-            const wallDistOf = (x, z) => {
-              let md = Infinity
-              for (let i = 0; i < wallPts.length; i++) {
-                const d = Math.hypot(x - wallPts[i].x, z - wallPts[i].z)
-                if (d < md) md = d
-              }
-              return Number.isFinite(md) ? md : 0
-            }
-            for (let cid = 0; cid < anchorGroups.length; cid++) {
-              const grpAnchors = anchorGroups[cid]
-              const l14Pool = []
-              const l13Caps = []
-              for (const ga of grpAnchors) {
-                const caps = capLeavesByAnchor.get(ga.ck) || []
-                const partnerTasks = ga.partners.map(p => this.tasks.get(`${p.x},${baseY0 - 1},${p.z}`)).filter(Boolean)
-                const anchorBaseTask = this.tasks.get(`${ga.x},${baseY0 - 1},${ga.z}`)
-                for (const c of caps) if (c && !clusteredKeys.has(c.key) && !l13Caps.includes(c)) l13Caps.push(c)
-                if (anchorBaseTask && !clusteredKeys.has(anchorBaseTask.key) && !l14Pool.includes(anchorBaseTask)) l14Pool.push(anchorBaseTask)
-                for (const pt of partnerTasks) if (pt && !clusteredKeys.has(pt.key) && !l14Pool.includes(pt)) l14Pool.push(pt)
-              }
-              if (!l14Pool.length && !l13Caps.length) continue
-              for (const bt of l14Pool) bt._wDist = wallDistOf(bt.world.x, bt.world.z)
-              for (const ct of l13Caps) ct._wDist = wallDistOf(ct.world.x, ct.world.z)
-              l14Pool.sort((a, b) => a._wDist - b._wDist)
-              const orderedL14 = l14Pool.length ? [l14Pool.shift()] : []
-              while (l14Pool.length) {
-                let bestIdx = 0; let bestScore = Infinity
-                for (let i = 0; i < l14Pool.length; i++) {
-                  const cand = l14Pool[i]
-                  let minStep = Infinity
-                  for (const placed of orderedL14) {
-                    const step = Math.abs(cand.world.x - placed.world.x) + Math.abs(cand.world.z - placed.world.z)
-                    if (step < minStep) minStep = step
-                  }
-                  const s = minStep * 100 + cand._wDist
-                  if (s < bestScore) { bestScore = s; bestIdx = i }
-                }
-                orderedL14.push(l14Pool.splice(bestIdx, 1)[0])
-              }
-              // Build ALL L14 (y = baseY0 - 1) floor blocks (cobblestone, oak_leaves + #w, black_stained_glass) of the cluster FIRST
-              // so the horizontal deck around every shaft hole is 100% solid before placing the L13 (y = baseY0 - 2) cap leaves from the safe center of the L14 deck!
-              const orderedBlocks = [...orderedL14, ...l13Caps]
-              const seq = []
-              const addBaseTask = (bt) => {
-                if (!bt || clusteredKeys.has(bt.key)) return
-                clusteredKeys.add(bt.key)
-                bt.isModuleBaseTask = true
-                seq.push(bt)
-                const bwl = this.tasks.get(`${bt.key}#w`)
-                if (bwl && !clusteredKeys.has(bwl.key)) {
-                  clusteredKeys.add(bwl.key)
-                  bwl.isModuleBaseTask = true
-                  seq.push(bwl)
-                }
-              }
-              for (const bt of orderedBlocks) addBaseTask(bt)
-              if (!seq.length) continue
-              const rootKey = seq[0].key
-              for (let idx = 0; idx < seq.length; idx++) {
-                const ct = seq[idx]
-                ct.verticalClusterId = cid
-                ct.verticalClusterRootKey = rootKey
-                ct.verticalClusterSeq = baseSeqIdx++
-                ct.verticalPrevKey = idx > 0 ? seq[idx - 1].key : null
-                allBaseClusterTasks.push(ct)
-              }
-              const minWallDist = orderedBlocks[0]._wDist
-              const cx = grpAnchors.reduce((s, ga) => s + ga.x, 0) / grpAnchors.length
-              const cz = grpAnchors.reduce((s, ga) => s + ga.z, 0) / grpAnchors.length
-              baseClusterLists.push({ cid, tasks: seq, ptr: 0, minWallDist, cx, cz })
-            }
-            const baseGroup = this.orderGroups.get(baseModuleOrder)
-            if (baseGroup && baseClusterLists.length) {
-              let extraCid = baseClusterLists.length
-              for (const set of baseGroup.cells.values()) {
-                const extraSeq = []
-                for (const t of set) {
-                  if (!clusteredKeys.has(t.key)) {
-                    clusteredKeys.add(t.key)
-                    t.isModuleBaseTask = true
-                    extraSeq.push(t)
-                  }
-                }
-                if (extraSeq.length) {
-                  const cid = extraCid++
-                  const rootKey = extraSeq[0].key
-                  for (let idx = 0; idx < extraSeq.length; idx++) {
-                    const ct = extraSeq[idx]
-                    ct.verticalClusterId = cid
-                    ct.verticalClusterRootKey = rootKey
-                    ct.verticalClusterSeq = baseSeqIdx++
-                    ct.verticalPrevKey = idx > 0 ? extraSeq[idx - 1].key : null
-                    allBaseClusterTasks.push(ct)
-                  }
-                  baseClusterLists.push({ cid, tasks: extraSeq, ptr: 0 })
-                }
-              }
-              const outerClusters = baseClusterLists.filter(cl => cl.minWallDist !== undefined && cl.minWallDist <= 4.5)
-              if (outerClusters.length >= 16) {
-                for (const cl of baseClusterLists) {
-                  if (cl.minWallDist !== undefined && cl.minWallDist > 4.5 && cl.tasks.length) {
-                    let bestOuter = null; let bestD = Infinity
-                    for (const ocl of outerClusters) {
-                      const d = Math.hypot(cl.cx - ocl.cx, cl.cz - ocl.cz)
-                      if (d < bestD) { bestD = d; bestOuter = ocl }
-                    }
-                    if (bestOuter && bestOuter.tasks.length) {
-                      cl.tasks[0].verticalPrevKey = bestOuter.tasks[bestOuter.tasks.length - 1].key
-                    }
-                  }
-                }
-              }
-              baseGroup.isModuleClusterBase = true
-              baseGroup.seqList = allBaseClusterTasks
-              baseGroup.seqPtr = 0
-              baseGroup.clusters = baseClusterLists
             }
           }
         }
@@ -2178,6 +2054,10 @@ class BuildPlanner {
 
   refPending (task) {
     if (task.kind !== 'block') return false
+    if (!task.info?.fragile && task.name !== 'hopper') {
+      if (task.bridgeAnchorKey && !task.islandPrevKey && this.tasks.get(task.bridgeAnchorKey)?.status === 'completed') return false
+      if (Array.isArray(task.altBridgeAnchorKeys) && task.altBridgeAnchorKeys.some(ak => this.tasks.get(ak)?.status === 'completed')) return false
+    }
     if (/^(chest|trapped_chest)$/.test(task.name || "") && this.tasks && task.properties?.facing) {
       const f = task.properties.facing
       const t = task.properties.type
@@ -2480,11 +2360,12 @@ class BuildPlanner {
     }
     for (const set of group.cells.values()) {
       for (const t of set) {
-        if (t.owner !== this.fleet.index) continue
-        if (!t.bridgeAnchorKey || t.info?.fragile) continue
+        if (this.effectiveOwner(t) !== this.fleet.index) continue
+        const hasAltDone = Array.isArray(t.altBridgeAnchorKeys) && t.altBridgeAnchorKeys.some(ak => this.tasks.get(ak)?.status === 'completed')
+        if ((!t.bridgeAnchorKey && !hasAltDone) || t.info?.fragile) continue
         if (!this.usable(t, now) || this.hasDirectlyUnfinishedBelow(t)) continue
         if (this.fleet.coord.busyFor(this.fleet.id, t, false)) continue
-        if (!this.refPending(t)) return true
+        if (hasAltDone || !this.refPending(t)) return true
       }
     }
     return false
@@ -2852,7 +2733,7 @@ class BuildPlanner {
       if (order >= 88000 && this.phaseBlocked(order)) continue
       const layer = order < 88000 ? Math.floor(order / 4) : 9999
       const hasUsable = this.groupHasUsableNow(group, now)
-      const isRetriedStragglerGroup = hasUsable && !group.isVerticalWallBand && !group.isModuleClusterBase && layer < 9999 && (
+      const isRetriedStragglerGroup = hasUsable && !group.isVerticalWallBand && !group.isModuleClusterBase && !group.hasDependentCapOrder && layer < 9999 && (
         (group.remaining <= 2 && !this.groupHasUnfinishedBelowMaxAttempts(group, 2)) ||
         (group.remaining <= 4 && (!this.groupHasUnfinishedBelowMaxAttempts(group, 1) || this.hasHigherLayerProgress(layer, 20)))
       )
@@ -2895,6 +2776,9 @@ class BuildPlanner {
         if (hasCand && !needColumnGuard) {
           const effChainOwner = group.chainOwner !== undefined ? this.effectiveOwner({ owner: group.chainOwner }) : undefined
           const isOtherWorkerChain = Boolean(this.fleet && group.isSingleWorkerChain && effChainOwner !== this.fleet.index)
+          if (group.hasDependentCapOrder && group.remaining > 0 && !isOtherWorkerChain) {
+            return null
+          }
           if (order < minOpenLayer * 4 + 2 && !isOtherWorkerChain) {
             sawUnreadyOnMinLayer = true
             continue
@@ -2992,7 +2876,7 @@ class BuildPlanner {
       if (order >= 88000 && this.phaseBlocked(order)) continue
       const layer = order < 88000 ? Math.floor(order / 4) : 9999
       const hasUsable = this.groupHasUsableNow(group, now)
-      const isRetriedStragglerGroup = hasUsable && layer < 9999 && (
+      const isRetriedStragglerGroup = hasUsable && !group.hasDependentCapOrder && layer < 9999 && (
         (group.remaining <= 2 && !this.groupHasUnfinishedBelowMaxAttempts(group, 2)) ||
         (group.remaining <= 4 && (!this.groupHasUnfinishedBelowMaxAttempts(group, 1) || this.hasHigherLayerProgress(layer, 20)))
       )
@@ -3048,7 +2932,7 @@ class BuildPlanner {
       const g = this.orderGroups.get(order)
       if (!g || g.remaining <= 0) continue
       const l = order < 88000 ? Math.floor(order / 4) : 9999
-      const isStragglerGrp = order < 88000 && (
+      const isStragglerGrp = order < 88000 && !g.hasDependentCapOrder && (
         (g.remaining <= 2 && !this.groupHasUnfinishedBelowMaxAttempts(g, 2)) ||
         (g.remaining <= 4 && (!this.groupHasUnfinishedBelowMaxAttempts(g, 1) || this.hasHigherLayerProgress(l, 20)))
       )
@@ -3205,13 +3089,14 @@ class BuildPlanner {
     return m
   }
 
-  revive ({ includeQuarantined = false, includeExpiredQuarantined = true } = {}) {
+  revive ({ includeQuarantined = false, includeExpiredQuarantined = true, onlyQuarantined = false } = {}) {
     let n = 0
     const now = Date.now()
     const isEndgame = this.remainingCount() <= 25
     for (const t of this.tasks.values()) {
       if (t.status === 'completed') continue
       const isQuarantined = Boolean(this.quarantined?.has(t.key))
+      if (onlyQuarantined && !isQuarantined) continue
       if (isQuarantined) {
         const expired = includeExpiredQuarantined && (now - (t.quarantinedAt || 0) >= 30_000)
         if (!includeQuarantined && !expired) continue

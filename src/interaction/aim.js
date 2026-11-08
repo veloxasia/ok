@@ -67,7 +67,7 @@ function specAccepts (spec, faceOpt, dir, hit, refPos, strict = true) {
     if (dominantDirection(dir) !== spec.look) return false
     const isHorizLook = spec.look !== 'up' && spec.look !== 'down'
     if (isHorizLook) {
-      if (Math.abs(dir.y) / len > 0.55) return false
+      if (Math.abs(dir.y) / len > (strict ? 0.55 : 0.58)) return false
     } else {
       const minVertCos = /^observer/.test(spec.tag || '') ? (strict ? 0.74 : 0.68) : (strict ? 0.65 : 0.58)
       if (Math.abs(dir.y) / len < minVertCos) return false

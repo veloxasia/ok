@@ -6,7 +6,7 @@
 const { Vec3 } = require('../util/vec3')
 const { sleep, waitFor, nextTick } = require('../util/async')
 const { taskMatches, isInteractive, FACE_INDEX, VEC, OPP, matches, describeBlock, usableFaces } = require('../rules/blocks')
-const { isAirLike, isBodyFree, isFullTop, isBottomSlab, isLowFloor, iceStandOk, feetCellOf } = require('../world/ground')
+const { isAirLike, isBodyFree, isFullTop, isBottomSlab, isLowFloor, iceStandOk, feetCellOf, supportUnder } = require('../world/ground')
 const { runStore } = require('../util/abort')
 const { validatePlacement } = require('./placement-validator')
 
@@ -292,6 +292,7 @@ class Placer {
             if (!pose) this.setSneak(!altSneak)
           }
           if (!pose) throw new BuildError('NO_ACCESS', `pose lost at ${key(cand.stand)}`)
+          if (pose.wantSneak !== undefined) { cand.sneak = Boolean(pose.wantSneak); if (cand.sneak !== Boolean(this.bot.getControlState('sneak'))) { this.setSneak(cand.sneak); await nextTick(this.bot) } }
           return { cand, pose }
         } catch (error) {
           if (cand.edge && cand.cell && this.bot.entity?.position && this.bot.entity.onGround) {
@@ -712,6 +713,7 @@ class Placer {
     for (let attempt = 0; attempt < 4; attempt++) {
       this.check()
       this.aimTries = (this.aimTries || 0) + 1
+      if (cur.wantSneak !== undefined && Boolean(cur.wantSneak) !== Boolean(this.bot.getControlState('sneak'))) { this.setSneak(Boolean(cur.wantSneak)); await nextTick(this.bot) }
       await this.look.lookAtPoint(cur.hit)
       let view = this.aim.validateView(spec, cur.faceOpt, cur.ref, cur.faceName)
       if (!view) {
@@ -2417,7 +2419,7 @@ class Placer {
     }
     const sneak = spec.sneak === false
       ? Boolean(ref && isInteractive(ref.name))
-      : (Boolean(spec.sneak) || Boolean(cand?.sneak) || Boolean(ref && isInteractive(ref.name)))
+      : (Boolean(spec.sneak) || Boolean(cand?.sneak) || Boolean(pose?.wantSneak) || Boolean(ref && isInteractive(ref.name)))
     return this.withSneak(sneak, async () => {
       let refreshed = (cand?.direct && pose) ? pose : this.aim.fromPose(target, spec, null, {})
       if (!refreshed && cand?.edge) {
@@ -2442,7 +2444,7 @@ class Placer {
       const finalRefBlock = this.world.blockAt(aimed.pose.ref) || refBlock
       const mustSneakNow = spec.sneak === false
         ? Boolean(finalRefBlock && isInteractive(finalRefBlock.name))
-        : (Boolean(spec.sneak) || Boolean(cand?.sneak) || Boolean(finalRefBlock && isInteractive(finalRefBlock.name)))
+        : (Boolean(spec.sneak) || Boolean(cand?.sneak) || Boolean(aimed?.pose?.wantSneak) || Boolean(finalRefBlock && isInteractive(finalRefBlock.name)))
       if (mustSneakNow) {
         this._chestSneak = true
         if (!this.bot.getControlState('sneak')) {

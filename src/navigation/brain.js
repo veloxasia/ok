@@ -654,11 +654,15 @@ class Brain {
     const preferPearlsNow = this.config.navigation?.pearls !== false &&
       this.config.navigation?.preferPearls !== false &&
       this.survival &&
-      Number(bot.health) >= 14 &&
-      (walkDistToStand > 14 || !primaryTowers.length || primaryTowers[0].height >= 3)
+      Number(bot.health) >= 16 &&
+      Date.now() - (this._lastPearlAt || 0) >= 20_000 &&
+      walkDistToStand > 15 &&
+      !(plan.bridges && plan.bridges.length) &&
+      (!primaryTowers.length || primaryTowers[0].height >= 9)
 
     const tryPearlsConnect = async () => {
-      if (!this.survival || Number(bot.health) < 14 || this.config.navigation?.pearls === false) return false
+      if (!this.survival || Number(bot.health) < 16 || this.config.navigation?.pearls === false) return false
+      if (Date.now() - (this._lastPearlAt || 0) < 20_000) return false
       const pearlPool = onIsolatedCol ? plan.pearls : plan.pearls.filter(c => c.y >= me.y - 2)
       const near = () => this.throwable(pearlPool)
       let tries = near()
@@ -691,6 +695,7 @@ class Brain {
       for (const c of tries) {
         checkAbort()
         const target = new Vec3(c.x + 0.5, c.y, c.z + 0.5)
+        this._lastPearlAt = Date.now()
         const ok = await this.survival.pearlTo(target).catch(() => false)
         if (ok) { this.stats.pearls++; this.stats.entered++; return true }
         if (['no pearls', 'health', 'in lava', 'in deep water', 'too close'].includes(this.survival.lastPearlReason)) break

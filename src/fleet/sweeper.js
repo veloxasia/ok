@@ -116,14 +116,24 @@ class SweeperEngine {
     return this.breakTempBlock(target, finalSweep)
   }
 
+  isEntombedInSolidWalls (p) {
+    for (const [dx, dy, dz] of [[0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]]) {
+      const nb = this.world.blockAt({ x: p.x + dx, y: p.y + dy, z: p.z + dz })
+      if (!nb || isAirLike(nb) || nb.boundingBox !== 'block') return false
+    }
+    return true
+  }
+
   scanWorldForTempBlocks (force = false) {
     const now = Date.now()
-    if (!force && now - this._lastWorldScanAt < 2500) return 0
+    if (!force && now - this._lastWorldScanAt < 6000) return 0
     this._lastWorldScanAt = now
     if (!this.planner?.box || !this.world?.blockAt) return 0
+    const globalDemand = this.planner.globalMaterialDemand || this.planner.materialDemand
+    const primaryTemp = this.scaffold?.itemName
     const tempNames = new Set(
-      [this.scaffold?.itemName, ...(this.config?.building?.scaffoldBlockNames || []), 'cobbled_deepslate', 'stone', 'netherrack', 'dirt']
-        .filter(n => n && !this.planner.materialDemand?.has(n))
+      [primaryTemp]
+        .filter(n => n && n !== 'cobblestone' && n !== 'dirt' && !globalDemand?.has(n) && !this.planner.materialDemand?.has(n))
     )
     if (!tempNames.size) return 0
     this.stats.scans++
@@ -139,11 +149,11 @@ class SweeperEngine {
     let added = 0
     const seen = new Set()
     for (const c of centers) {
-      for (let dx = -14; dx <= 14; dx++) {
-        for (let dz = -14; dz <= 14; dz++) {
+      for (let dx = -8; dx <= 8; dx++) {
+        for (let dz = -8; dz <= 8; dz++) {
           const x = c.x + dx; const z = c.z + dz
           if (x < bx.x0 - 2 || x > bx.x1 + 2 || z < bx.z0 - 2 || z > bx.z1 + 2) continue
-          for (let dy = -5; dy <= 5; dy++) {
+          for (let dy = -3; dy <= 3; dy++) {
             const y = c.y + dy
             if (y < bx.y0 || y > bx.y1 + 2) continue
             const k = `${x},${y},${z}`
@@ -153,6 +163,7 @@ class SweeperEngine {
             if (!b || !tempNames.has(b.name)) continue
             const t = this.planner.tasks?.get(k)
             if (t && (t.status === 'completed' || taskMatches(b, t))) continue
+            if (this.isEntombedInSolidWalls({ x, y, z })) continue
             const v = new Vec3(x, y, z)
             v.createdAt = now - 6000
             v.isCatwalk = true
@@ -197,16 +208,30 @@ class SweeperEngine {
 
   isSafeToBreak (p, finalSweep = false) {
     const k = `${p.x},${p.y},${p.z}`
+    const fails = this.failCounts.get(k) || 0
+    if (fails >= (finalSweep ? 4 : 2)) {
+      if (finalSweep && fails >= 4) {
+        this.scaffold.created.delete(k)
+        this.fleet?.coord?.removeTempBlock?.(k, this.fleet?.id)
+      }
+      return false
+    }
     const failAt = this.unreachable.get(k)
     if (failAt) {
-      const fails = this.failCounts.get(k) || 1
-      const cooldown = finalSweep ? Math.min(15_000, 3_000 * fails) : Math.min(45_000, 12_000 * fails)
+      const cooldown = finalSweep ? Math.min(20_000, 5_000 * Math.max(1, fails)) : Math.min(60_000, 15_000 * Math.max(1, fails))
       if (Date.now() - failAt < cooldown) return false
     }
     const b = this.world.blockAt(p)
     if (!b || isAirLike(b)) return false
     const t = this.planner?.tasks?.get(k)
     if (t && (t.status === 'completed' || taskMatches(b, t))) return false
+    if (this.isEntombedInSolidWalls(p)) {
+      if (finalSweep) {
+        this.scaffold.created.delete(k)
+        this.fleet?.coord?.removeTempBlock?.(k, this.fleet?.id)
+      }
+      return false
+    }
     if (this.placer?.fluidBeside?.(p, finalSweep)) return false
 
     const me = this.bot.entity?.position
@@ -392,9 +417,9 @@ class SweeperEngine {
     const dy = cand.stand.y - e.y
 
     let pearled = false
-    const allowPearlHere = (dist > 11 || (dy >= 2.0 && dy <= 7.0)) &&
-      (finalSweep || (dy >= -1.5 && dy <= 6.0)) &&
-      Date.now() - (this._lastPearlAt || 0) > 45_000 &&
+    const allowPearlHere = (dist > 14 || (dy >= 3.0 && dy <= 7.0)) &&
+      (finalSweep || (dy >= 0 && dy <= 6.0)) &&
+      Date.now() - (this._lastPearlAt || 0) > 60_000 &&
       this.survival && Number(this.bot.health) >= 16 && this.config.navigation?.pearls !== false
     if (allowPearlHere) {
       this._lastPearlAt = Date.now()
@@ -490,9 +515,9 @@ class SweeperEngine {
         const target = safeTargets[0]
         this.placer?.setPhase?.('digging stone')
         this.fleet?.coord?.claim(this.fleet.id, { key: `sweep:${target.x},${target.y},${target.z}`, world: target })
-        await this.breakTempBlock(target, finalSweep)
+        const broke = await this.breakTempBlock(target, finalSweep)
         this.fleet?.coord?.release(this.fleet.id)
-        await sleep(25)
+        await sleep(broke ? 40 : 250)
         continue
       }
 

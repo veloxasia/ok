@@ -602,6 +602,9 @@ class ScaffoldManager {
       const landed = await this.ground.waitSafe(2000)
       if (landed !== 'grounded' && landed !== 'resting') throw new Error(`tower: bot is ${landed} after placing`)
     }
+    if (this.bot?.builder?.placer) {
+      this.bot.builder.placer._edgeSneakUntil = Date.now() + 1800
+    }
     this.phaseHook?.('tower: completed')
   }
 
@@ -668,6 +671,10 @@ class ScaffoldManager {
       const underPos = new Vec3(Math.floor(p.x), Math.floor(p.y - 0.05), Math.floor(p.z))
       const rec = this.created.get(key(underPos))
       if (!rec || rec.isAccessStep || rec.isTempLadder) return
+      const below1 = this.world.blockAt(underPos.offset(0, -1, 0))
+      const below2 = this.world.blockAt(underPos.offset(0, -2, 0))
+      const hasSolidBelow = (below1 && isFullTop(below1) && !isAirLike(below1) && below1.name !== 'lava') ||
+                            (below2 && isFullTop(below2) && !isAirLike(below2) && below2.name !== 'lava')
       let walledAtUnder = 0
       let stepOutTop = null
       for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
@@ -676,18 +683,32 @@ class ScaffoldManager {
           walledAtUnder++
           const w2 = this.world.blockAt(underPos.offset(dx, 2, dz))
           const w3 = this.world.blockAt(underPos.offset(dx, 3, dz))
-          if (!stepOutTop && isFullTop(w1) && isBodyFree(w2) && isBodyFree(w3)) {
+          if (!stepOutTop && !this.created.has(key(underPos.offset(dx, 1, dz))) && isFullTop(w1) && isBodyFree(w2) && isBodyFree(w3)) {
             stepOutTop = new Vec3(underPos.x + dx + 0.5, underPos.y + 2, underPos.z + dz + 0.5)
           }
         }
+        const w0 = this.world.blockAt(underPos.offset(dx, 0, dz))
+        const w0b1 = this.world.blockAt(underPos.offset(dx, 1, dz))
+        const w0b2 = this.world.blockAt(underPos.offset(dx, 2, dz))
+        if (!stepOutTop && w0 && !this.created.has(key(underPos.offset(dx, 0, dz))) && isFullTop(w0) && isBodyFree(w0b1) && isBodyFree(w0b2)) {
+          stepOutTop = new Vec3(underPos.x + dx + 0.5, underPos.y + 1, underPos.z + dz + 0.5)
+        }
       }
-      if ((walledAtUnder >= 2 || this.heightUnderFeet() <= 2) && stepOutTop) {
-        if (this.heightUnderFeet() === 1) {
+      if ((!hasSolidBelow || walledAtUnder >= 2 || this.heightUnderFeet() <= 2) && stepOutTop) {
+        if (this.heightUnderFeet() === 1 || !hasSolidBelow) {
           rec.isAccessStep = true
+          rec.isCatwalk = true
           this.created.set(key(underPos), rec)
         }
         const stepped = await this._stepOntoTop(stepOutTop, 1600).catch(() => false)
         if (stepped) return
+      }
+      // Never dig out a floating temporary bridge/ledge block under the bot's own feet when there is >2 blocks of open air below!
+      if (!hasSolidBelow) {
+        rec.isAccessStep = true
+        rec.isCatwalk = true
+        this.created.set(key(underPos), rec)
+        return
       }
       this.bot.setControlState?.('sneak', false)
       if (Math.hypot(p.x - (underPos.x + 0.5), p.z - (underPos.z + 0.5)) > 0.15) {

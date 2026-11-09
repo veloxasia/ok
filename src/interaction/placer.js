@@ -171,12 +171,7 @@ class Placer {
         }
       }
     }
-    if (!opts.fixedStand && !opts.onlyScaffold && this.bot?.entity?.position && this.bot.entity.position.distanceTo(target) > 24) {
-      const targetGround = new Vec3(target.x + 0.5, target.y, target.z + 0.5)
-      if (!this.brain || this.reachVerdict(targetGround) === 'yes') {
-        await this.nav.goTo(targetGround, 7.5, 4_500, { human: true, work: true, rescue: false }).catch(() => {})
-      }
-    }
+
     const tried = new Set()
     let lastError = null
     for (const phase of ['stand', 'tower']) {
@@ -2578,35 +2573,14 @@ class Placer {
         throw new BuildError('WRONG_BLOCK', `could not clear ${afterClear.name} at ${key(task.world)} before pouring ${task.name}`)
       }
     }
-    if (planner?.fluidCheck) {
-      let fc = planner.fluidCheck(task)
-      if (fc.tempObstructions?.length) {
-        for (const obs of fc.tempObstructions) {
-          const ok = key(obs)
-          if (!this.scaffold.created.has(ok)) {
-            const v = new Vec3(obs.x, obs.y, obs.z); v.createdAt = Date.now() - 10_000
-            this.scaffold.created.set(ok, v)
-          }
-        }
-        const obsSet = new Set(fc.tempObstructions.map(key))
-        await this.sweepTemporary({ maxBlocks: fc.tempObstructions.length, final: true, only: obsSet, ignoreReserved: true, ignoreFluidBeside: true }).catch(() => {})
-        for (const obs of fc.tempObstructions) {
-          const ob = this.world.blockAt(obs)
-          if (ob && ob.boundingBox === "block" && !isAirLike(ob)) {
-            await this.digBlock(obs, { allowScaffold: false }).catch(() => {})
-            this.scaffold.created.delete(key(obs))
-          }
-        }
-        task._fc = null
-        fc = planner.fluidCheck(task)
-      }
-      // Never force-pour fluid when `fc.blocked` is true unless `task.fluidForce` was explicitly set by user!
-      const hasBlockedOrTemp = Boolean(fc.blocked || fc.tempObstructions?.length > 0)
-      const forced = Boolean(hasBlockedOrTemp && task.fluidForce)
-      if (hasBlockedOrTemp && !forced) {
+    let fc = planner?.fluidCheck ? planner.fluidCheck(task) : null
+    const throwIfFluidBlocked = (checkRes) => {
+      if (!checkRes) return
+      const forced = Boolean(checkRes.blocked && task.fluidForce)
+      if (checkRes.blocked && !forced) {
         let hasQuarantinedLeak = false
-        if (Array.isArray(fc.leaks)) {
-          for (const lk of fc.leaks) {
+        if (Array.isArray(checkRes.leaks)) {
+          for (const lk of checkRes.leaks) {
             const lt = planner.tasks?.get(lk)
             if (lt && lt.kind === "block") {
               if (planner.quarantined?.has(lk) || (lt.status === "blocked" && (lt.totalAttempts || 0) >= 2)) {
@@ -2617,12 +2591,12 @@ class Placer {
             }
           }
         }
-        const err = new BuildError("UNSAFE", `not pouring ${task.name} at ${key(task.world)}: ${fc.why}`)
+        const err = new BuildError("UNSAFE", `not pouring ${task.name} at ${key(task.world)}: ${checkRes.why}`)
         if (hasQuarantinedLeak) err.quarantinedLeak = true
         throw err
       }
-      this.recorder?.pour(task, fc, { forced })
     }
+    throwIfFluidBlocked(fc)
     let approached
     try {
       approached = await this.approach(task.world, FREE, { allowScaffold: false, minStandDist: lava ? 1.8 : 1.5, bucket: true })
@@ -2636,6 +2610,45 @@ class Placer {
           throw accessErr
         }
       }
+    }
+    if (planner?.fluidCheck) {
+      task._fc = null
+      fc = planner.fluidCheck(task)
+      if (fc.tempObstructions?.length) {
+        const sortedObs = [...fc.tempObstructions].sort((a, b) => b.y - a.y)
+        for (const obs of sortedObs) {
+          const ok = key(obs)
+          if (!this.scaffold.created.has(ok)) {
+            const v = new Vec3(obs.x, obs.y, obs.z); v.createdAt = Date.now() - 10_000
+            this.scaffold.created.set(ok, v)
+          }
+        }
+        const obsSet = new Set(sortedObs.map(key))
+        await this.sweepTemporary({ maxBlocks: sortedObs.length, final: true, only: obsSet, ignoreReserved: true, ignoreFluidBeside: true }).catch(() => {})
+        for (const obs of sortedObs) {
+          const ob = this.world.blockAt(obs)
+          if (!ob || ob.boundingBox !== "block" || isAirLike(ob)) {
+            this.scaffold.created.delete(key(obs))
+            continue
+          }
+          const eyeNow = this.bot.entity?.position?.offset(0, 1.62, 0)
+          if (eyeNow && eyeNow.distanceTo(new Vec3(obs.x + 0.5, obs.y + 0.5, obs.z + 0.5)) <= 4.65) {
+            const obsPose = this.aim.fromPose(obs, FREE, null, { mode: 'self' })
+            if (obsPose) {
+              try {
+                const aimedObs = await this.aimAndValidate(obs, FREE, obsPose, { mode: 'self' })
+                await this.interaction.digAimed(this.world.blockAt(obs), FACE_INDEX[aimedObs.pose.faceName])
+                this.scaffold.created.delete(key(obs))
+                this.invalidateWorldCaches()
+              } catch {}
+            }
+          }
+        }
+        task._fc = null
+        fc = planner.fluidCheck(task)
+      }
+      throwIfFluidBlocked(fc)
+      this.recorder?.pour(task, fc, { forced: Boolean(fc.blocked && task.fluidForce) })
     }
     const { pose } = approached
     try {

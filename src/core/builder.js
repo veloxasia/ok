@@ -293,8 +293,10 @@ class ConstructionEngine {
     this.planner.isTempCell = (x, y, z) => this.scaffold.created.has(`${x},${y},${z}`) || Boolean(this.fleet?.coord?.tempBlocks?.has(`${x},${y},${z}`))
     this.scaffold.noScaffold = pos => {
       const k = `${pos.x},${pos.y},${pos.z}`
+      if (this.planner.fluidCells?.get(k) === 'lava') return true
       const t = this.planner.tasks.get(k)
       if (!t || t.kind !== 'fluid') return false
+      if (t.name === 'lava') return true
       const b = this.world.blockAt(pos)
       return t.status === 'completed' || Boolean(b && (b.name === 'water' || b.name === 'lava') && (Number(b.metadata) === 0 || String(b.getProperties?.()?.level ?? '0') === '0'))
     }
@@ -449,9 +451,10 @@ class ConstructionEngine {
       tempBlocks: this.scaffold.getCreated().map(p => ({ x: p.x, y: p.y, z: p.z })),
       updatedAt: new Date().toISOString()
     }
-    await this.persistence.save(this.jobId, snapshot)
+    const serializedSnapshot = JSON.stringify(snapshot)
+    await this.persistence.save(this.jobId, snapshot, serializedSnapshot)
     if (this.sharedJobId && this.sharedJobId !== this.jobId) {
-      await this.persistence.save(this.sharedJobId, snapshot).catch(() => {})
+      await this.persistence.save(this.sharedJobId, snapshot, serializedSnapshot).catch(() => {})
     }
     const meta = {
       file: this.loaded?.file ? path.basename(this.loaded.file) : undefined,
@@ -982,7 +985,8 @@ class ConstructionEngine {
         await sleep(Math.min(50, Number(this.config.building.accessRetryDelayMs || 40)))
       }
 
-      if (this.actionsSinceSave >= Number(this.config.building.saveEveryActions || 32)) {
+      if (this.actionsSinceSave >= Number(this.config.building.saveEveryActions || 32) && Date.now() - (this._lastSaveAt || 0) >= 25_000) {
+        this._lastSaveAt = Date.now()
         await this.save().catch(error => this.logger.warn(`save failed: ${error.message}`))
         this.actionsSinceSave = 0
       }

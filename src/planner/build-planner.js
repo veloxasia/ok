@@ -156,6 +156,7 @@ class BuildPlanner {
         partition2D(list, allWorkers)
       }
     }
+    if (!this.globalMaterialDemand) this.globalMaterialDemand = new Map(this.materialDemand)
     this.materialDemand = new Map()
     for (const t of this.tasks.values()) if (t.owner === index) this.materialDemand.set(t.item, (this.materialDemand.get(t.item) || 0) + 1)
     return this
@@ -1966,7 +1967,14 @@ class BuildPlanner {
       const belowForeignFluid = Boolean(below && solid(below) && !this.tasks.has(belowKey) && this.fluidCells.has(belowKey))
       if (belowTemp || belowForeignFluid) addTempObs(x, y - 1, z)
       const belowTaskUnfinished = Boolean(belowTask && belowTask.kind === "block" && (belowTask.status !== "completed" || belowTemp || !below || !taskMatches(below, belowTask)))
-      if (!solid(below) || belowTaskUnfinished || ((belowTemp || belowForeignFluid) && this.fluidCells.has(belowKey))) { visit(x, y - 1, z, reach); continue }
+      if (!solid(below) || belowTaskUnfinished) { visit(x, y - 1, z, reach); continue }
+      if ((belowTemp || belowForeignFluid) && this.fluidCells.has(belowKey)) {
+        visit(x, y - 1, z, reach)
+        if (lvl > 1) {
+          for (const [dx, dz] of D4) visit(x + dx, y, z + dz, lvl - 1)
+        }
+        continue
+      }
       if (lvl <= 1) continue
       for (const [dx, dz] of D4) visit(x + dx, y, z + dz, lvl - 1)
     }
@@ -3137,6 +3145,8 @@ class BuildPlanner {
           this.blocked.add(task.key)
           if (!this.quarantined) this.quarantined = new Set()
           this.quarantined.add(task.key)
+          task.quarantinedAt = Date.now()
+          task._quarantineMask = this.neighborSolidMask(task.world)
           if (this.fleet) this.fleet.coord.quarantine?.(task.key, this.fleet.id)
           this.logger?.warn?.(`QUARANTINE: ${task.name}@${task.key} quarantined because enclosure leak is quarantined/unsealed (${task.lastError}); queued for end-of-build verify-and-repair pass`)
           return
@@ -3224,7 +3234,10 @@ class BuildPlanner {
       if (isQuarantined) {
         const expired = includeExpiredQuarantined && (now - (t.quarantinedAt || 0) >= 30_000)
         if (!includeQuarantined && !expired) continue
-        if (!isEndgame && !expired && t._quarantineMask !== undefined && this.neighborSolidMask(t.world) === t._quarantineMask) continue
+        if (!isEndgame && !includeQuarantined) {
+          if ((t.quarantineRevives || 0) >= 1) continue
+          if (t._quarantineMask !== undefined && this.neighborSolidMask(t.world) === t._quarantineMask) continue
+        }
       }
       if (t.status === 'blocked' || t.status === 'deferred' || t.status === 'failed' || (t.anyUntil || 0) > 0) {
         if (t.status === 'blocked') this.blocked.delete(t.key)
@@ -3234,8 +3247,10 @@ class BuildPlanner {
         t.anyUntil = 0
         t.anyTries = 0
         if (isQuarantined) {
+          t.quarantineRevives = (t.quarantineRevives || 0) + 1
           t.attempts = 0
           t.totalAttempts = 0
+          t.unsafeCount = 0
           t.forceSupport = true
           if (this.fleet && this.fleet.count > 1) {
             t.owner = ((t.owner ?? this.fleet.index) + 1) % this.fleet.count

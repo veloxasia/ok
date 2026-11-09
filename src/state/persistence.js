@@ -59,12 +59,16 @@ class Persistence {
     return next
   }
 
-  async _atomicWriteJson (file, data) {
+  async _atomicWriteJson (file, data, preSerialized = null) {
     return this._enqueueWrite(file, async () => {
       await fs.mkdir(path.dirname(file), { recursive: true })
       const uniq = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`
       const tmp = `${file}.${uniq}.tmp`
-      const payload = JSON.stringify(data, null, 2)
+      const payload = typeof preSerialized === 'string'
+        ? preSerialized
+        : (data && Array.isArray(data.planner) && data.planner.length > 500
+            ? JSON.stringify(data)
+            : JSON.stringify(data, null, 2))
       try {
         await fs.writeFile(tmp, payload, 'utf8')
         await fs.rename(tmp, file)
@@ -125,8 +129,8 @@ class Persistence {
     return primary
   }
 
-  async save (jobId, state) {
-    await this._atomicWriteJson(this.fileFor(jobId), state)
+  async save (jobId, state, preSerialized = null) {
+    await this._atomicWriteJson(this.fileFor(jobId), state, preSerialized)
   }
 
   async loadActive () {

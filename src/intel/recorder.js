@@ -5,6 +5,7 @@
 //   <stateDir>/postmortems/*.json       one file per serious incident: last 20 s of frames + log lines + blocks around + classification
 //   <stateDir>/diagnosis.<name>.md      rolling summary: counts per category, deaths, leaks, stuck spots, failing tasks, what to do
 const fs = require('fs')
+const fsAsync = require('fs/promises')
 const path = require('path')
 const { Logger } = require('../core/logger')
 const { classifyDamage, classifyLeak, classifyStuck, classifyLine } = require('./causes')
@@ -50,7 +51,7 @@ class FlightRecorder {
     on('kicked', r => this.event('kicked', { reason: String(r).slice(0, 300) }, 'error'))
     on('end', r => this.event('disconnected', { reason: String(r) }, 'error'))
     this.timers.push(setInterval(() => { try { this.tick() } catch (e) { this.countOnly('recorder-error', e.message) } }, FRAME_MS))
-    this.timers.push(setInterval(() => { try { this.writeSummary() } catch { /* never throws */ } }, 60_000))
+    this.timers.push(setInterval(() => { try { this.writeSummaryAsync() } catch { /* never throws */ } }, 60_000))
     for (const t of this.timers) t.unref?.()
     this.untap = Logger.tap((prefix, level, text) => { if (prefix && this.name && prefix !== this.name) return; this.onLogLine(level, text) })
     this.event('recorder-start', { worker: this.name })
@@ -84,15 +85,17 @@ class FlightRecorder {
   taskStart (task) { this.tasks.push({ t: Date.now(), name: task.name, key: task.key, kind: task.kind, phase: 'start' }); if (this.tasks.length > 40) this.tasks.shift(); this.curTask = { name: task.name, key: task.key, t: Date.now() }; this.event('task-start', { task: task.name, at: task.key, attempts: task.attempts, pos: this.pos(), hp: this.bot.health }) }
   taskEnd (task, ms) { this.tasks.push({ t: Date.now(), name: task.name, key: task.key, phase: 'ok', ms }); if (this.tasks.length > 40) this.tasks.shift(); this.curTask = null; this.stats.tasksOk = (this.stats.tasksOk || 0) + 1; this.event('task-ok', { task: task.name, at: task.key, ms }) }
   taskFail (task, error) {
-    const k = `${task.name}|${error.code || 'ERR'}`
+    const code = error?.code || 'ERR'
+    const k = `${task.name}|${code}`
     const row = this.failures.get(k) || { n: 0, at: new Set(), msg: '' }
     row.n++; row.at.add(task.key); row.msg = String(error.message).slice(0, 200)
     this.failures.set(k, row)
-    this.tasks.push({ t: Date.now(), name: task.name, key: task.key, phase: 'fail', code: error.code || 'ERR', msg: String(error.message).slice(0, 160) })
+    this.tasks.push({ t: Date.now(), name: task.name, key: task.key, phase: 'fail', code, msg: String(error.message).slice(0, 160) })
     if (this.tasks.length > 40) this.tasks.shift()
     this.curTask = null
-    this.event('task-fail', { task: task.name, at: task.key, code: error.code || 'ERR', msg: String(error.message).slice(0, 200), phase: this.getPhase?.(), pos: this.pos(), attempts: task.attempts }, 'warn')
-    this.count(`task-fail:${error.code || 'ERR'}`, `${task.name} ${task.key}: ${error.message}`)
+    this.count(`task-fail:${code}`, `${task.name} ${task.key}: ${error.message}`)
+    if (code === 'UNSAFE') return
+    this.event('task-fail', { task: task.name, at: task.key, code, msg: String(error.message).slice(0, 200), phase: this.getPhase?.(), pos: this.pos(), attempts: task.attempts }, 'warn')
     if (row.n === 5 || row.n === 25) this.postmortem('task-failures', { cause: `${row.n} x ${k}`, reasons: [`the same kind of failure keeps repeating (${row.at.size} different blocks)`, row.msg], fix: 'see the failure code table in diagnosis.md' }, 'warn')
   }
 
@@ -258,6 +261,9 @@ class FlightRecorder {
   scaffoldHas (k) { try { const sc = this.getScaffold?.(); return Boolean(sc && sc.created && sc.created.has(k)) } catch { return false } }
 
   onFluidBlock (k, b, from) {
+    // Only record leak postmortems for LAVA flows; water flows in cobblestone/waterlogged-leaf farms are benign and
+    // already ignored by Engine.onLeak.
+    if (!b || b.name !== 'lava') return
     const planner = this.getPlanner?.()
     if (!planner || planner.fluidCells.has(k) || planner.tasks.has(k)) return
     const kind = b.name
@@ -265,7 +271,7 @@ class FlightRecorder {
     this.pendingLeak = this.pendingLeak || { cells: new Set(), kind, first: k, t: Date.now() }
     this.pendingLeak.cells.add(k)
     if (!this.leakTimer) {
-      this.leakTimer = setTimeout(() => { this.leakTimer = null; try { this.flushLeak() } catch { /* ok */ } }, 1500) // let the flow settle, then explain it once
+      this.leakTimer = setTimeout(() => { this.leakTimer = null; try { this.flushLeak() } catch { /* ok */ } }, 1500)
       this.leakTimer.unref?.()
     }
   }
@@ -275,7 +281,6 @@ class FlightRecorder {
     if (!lk) return
     const planner = this.getPlanner?.()
     const cells = [...lk.cells]
-    // the cell nearest to a pour is the likely entry point
     const cls = classifyLeak({
       cell: lk.first, kind: lk.kind, pours: this.pours, history: this.history, now: Date.now(),
       isDesignAir: c => { const box = planner && planner.box; if (!box) return false; const [x, y, z] = c.split(',').map(Number); return x >= box.x0 && x <= box.x1 && y >= box.y0 && y <= box.y1 && z >= box.z0 && z <= box.z1 && !planner.tasks.has(c) },
@@ -312,8 +317,8 @@ class FlightRecorder {
   // ---- postmortem files -------------------------------------------------------------------------------------------------------------
   postmortem (type, cls, severity = 'warn', extra = {}) {
     if (!this.dir) return null
-    if (!this.once(`pm:${type}`, type === 'death' ? 1000 : 20_000)) return null
-    if (this.postCount >= 300) return null
+    if (!this.once(`pm:${type}`, type === 'death' ? 5000 : 60_000)) return null
+    if (this.postCount >= 120) return null
     this.postCount++
     const e = this.bot.entity
     const doc = {
@@ -329,11 +334,13 @@ class FlightRecorder {
     }
     if (extra.cell) { const h = []; const [x, y, z] = extra.cell.split(',').map(Number); for (let dx = -3; dx <= 3; dx++) for (let dy = -2; dy <= 2; dy++) for (let dz = -3; dz <= 3; dz++) { const kk = `${x + dx},${y + dy},${z + dz}`; const r = this.history.get(kk); if (r) h.push({ cell: kk, changes: r.map(c => ({ ...c, agoS: +((Date.now() - c.t) / 1000).toFixed(0), t: undefined })) }) } doc.blockHistoryNearLeak = h.slice(0, 60); doc.leakWorld = this.slice({ x, y, z }, 5, 4, 5) }
     try {
-      const dir = path.join(this.dir, 'postmortems'); fs.mkdirSync(dir, { recursive: true })
-      const file = path.join(dir, `${new Date().toISOString().replace(/[:.]/g, '-')}.${this.name || 'bot'}.${type}.json`)
-      fs.writeFileSync(file, JSON.stringify(doc, null, 1))
-      this.event('postmortem', { type, file: path.basename(file), cause: cls.cause }, severity)
-      this.logLine(`POSTMORTEM ${type}: ${cls.cause} -> ${path.basename(file)}`)
+      const dir = path.join(this.dir, 'postmortems')
+      const fname = `${new Date().toISOString().replace(/[:.]/g, '-')}.${this.name || 'bot'}.${type}.json`
+      const file = path.join(dir, fname)
+      const payload = JSON.stringify(doc)
+      fsAsync.mkdir(dir, { recursive: true }).then(() => fsAsync.writeFile(file, payload, 'utf8')).catch(() => {})
+      this.event('postmortem', { type, file: fname, cause: cls.cause }, severity)
+      this.logLine(`POSTMORTEM ${type}: ${cls.cause} -> ${fname}`)
     } catch { /* never throws */ }
     return doc
   }
@@ -353,6 +360,12 @@ class FlightRecorder {
     const cats = Object.entries(this.counts).sort((a, b) => b[1] - a[1]).slice(0, 30).map(([k, v]) => `- ${v}x ${k}${this.samples[k] ? ` — ${this.samples[k]}` : ''}`)
     sect('Everything counted', cats)
     return lines.join('\n')
+  }
+
+  writeSummaryAsync () {
+    if (!this.dir) return
+    const md = this.summaryMarkdown()
+    fsAsync.writeFile(path.join(this.dir, `diagnosis.${this.name || 'bot'}.md`), md, 'utf8').catch(() => {})
   }
 
   writeSummary () { if (!this.dir) return; fs.writeFileSync(path.join(this.dir, `diagnosis.${this.name || 'bot'}.md`), this.summaryMarkdown()) }

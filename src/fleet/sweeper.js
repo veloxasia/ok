@@ -117,6 +117,7 @@ class SweeperEngine {
   }
 
   isEntombedInSolidWalls (p) {
+    if (!this.planner?.tasks?.size) return false
     for (const [dx, dy, dz] of [[0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]]) {
       const nb = this.world.blockAt({ x: p.x + dx, y: p.y + dy, z: p.z + dz })
       if (!nb || isAirLike(nb) || nb.boundingBox !== 'block') return false
@@ -235,6 +236,9 @@ class SweeperEngine {
     if (this.placer?.fluidBeside?.(p, finalSweep)) return false
 
     const me = this.bot.entity?.position
+    if (!finalSweep && me && Math.abs(p.y - me.y) > 5.5) {
+      return false
+    }
     if (me && Math.abs(p.x + 0.5 - me.x) < 0.85 && Math.abs(p.z + 0.5 - me.z) < 0.85 && p.y >= Math.floor(me.y - 0.1) - 1 && p.y <= Math.floor(me.y) + 1) {
       return false
     }
@@ -305,7 +309,7 @@ class SweeperEngine {
       if (p.isTempLadder && !isCurrentLayerTaskHere && !isActiveFluidObstruction) {
         return false
       }
-      if (p.isAccessStep && !p.isCatwalk && !isCurrentLayerTaskHere && !isActiveFluidObstruction && p.y >= baseLayerY - 1 && age < 15_000) {
+      if (p.isAccessStep && !p.isCatwalk && !isCurrentLayerTaskHere && !isActiveFluidObstruction) {
         return false
       }
 
@@ -388,7 +392,7 @@ class SweeperEngine {
       allowEdgeShift: true,
       max: 24,
       stages: [{ r: 5, down: 5, up: 5, aroundTarget: true }]
-    }).filter(c => !(c.cell.x === p.x && c.cell.z === p.z && c.cell.y >= p.y && c.cell.y <= p.y + 2) && !this.placer.isDeadStand?.(c.stand) && (finalSweep || e.y - c.stand.y <= 3.2))
+    }).filter(c => !(c.cell.x === p.x && c.cell.z === p.z && c.cell.y >= p.y && c.cell.y <= p.y + 2) && !this.placer.isDeadStand?.(c.stand) && (finalSweep || Math.abs(e.y - c.stand.y) <= 3.5))
 
     const nonTempCs = allCs.filter(c => !this.scaffold.contains(c.cell) && !this.scaffold.contains({ x: c.cell.x, y: c.cell.y - 1, z: c.cell.z }))
     const rawCs = nonTempCs.length ? [...nonTempCs, ...allCs.filter(c => !nonTempCs.includes(c))] : allCs
@@ -529,6 +533,24 @@ class SweeperEngine {
         continue
       }
 
+      if (this.fleet?.coord?.workers && Date.now() - (this._lastDeckFollowAt || 0) > 8_000) {
+        let bestWp = null
+        let bestDist = Infinity
+        for (const w of this.fleet.coord.workers.values()) {
+          if (w.id === this.fleet.id) continue
+          const wp = this.fleet.coord.position(w)
+          if (wp && wp.y - e.y >= 5.0) {
+            const d = Math.hypot(wp.x - e.x, wp.z - e.z)
+            if (d < bestDist) { bestDist = d; bestWp = wp }
+          }
+        }
+        if (bestWp) {
+          this._lastDeckFollowAt = Date.now()
+          this.placer.setPhase('sweeper: climbing to active deck')
+          await this.nav.goTo(new Vec3(Math.floor(bestWp.x) + 0.5, Math.floor(bestWp.y), Math.floor(bestWp.z) + 0.5), 3.5, 10_000, { human: true, work: true, rescue: true }).catch(() => {})
+          continue
+        }
+      }
       await this.stepAsideIfCrowded()
       this.placer.setPhase('sweeper: watching for temporary blocks')
       await sleep(250)

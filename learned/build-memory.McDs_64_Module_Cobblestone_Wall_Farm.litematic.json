@@ -1,0 +1,81 @@
+{
+  "version": 8,
+  "runs": 1,
+  "completedRuns": 0,
+  "supportNeeded": {},
+  "bestStands": {},
+  "lockedSpecs": {
+    "41,22,-50@0": "fluid",
+    "20,22,-59@0": "fluid",
+    "18,22,-53@0": "fluid",
+    "17,22,-58@0": "fluid",
+    "22,22,-57@0": "fluid",
+    "10,22,-53@0": "fluid",
+    "8,22,-55@0": "fluid",
+    "4,22,-59@0": "fluid",
+    "5,22,-62@0": "fluid",
+    "4,22,-75@0": "fluid",
+    "10,22,-77@0": "fluid",
+    "13,22,-78@0": "fluid",
+    "21,22,-78@0": "fluid",
+    "16,22,-79@0": "fluid",
+    "25,22,-58@0": "fluid",
+    "24,22,-55@0": "fluid",
+    "30,22,-57@0": "fluid",
+    "25,22,-50@0": "fluid"
+  },
+  "provenFluids": [
+    "41,22,-50@0",
+    "20,22,-59@0",
+    "18,22,-53@0",
+    "17,22,-58@0",
+    "22,22,-57@0",
+    "10,22,-53@0",
+    "8,22,-55@0",
+    "4,22,-59@0",
+    "5,22,-62@0",
+    "4,22,-75@0",
+    "10,22,-77@0",
+    "13,22,-78@0",
+    "21,22,-78@0",
+    "16,22,-79@0",
+    "25,22,-58@0",
+    "24,22,-55@0",
+    "30,22,-57@0",
+    "25,22,-50@0"
+  ],
+  "hazardCells": {},
+  "hardBlocks": {
+    "22,22,-57@0": {
+      "name": "lava",
+      "fails": 1,
+      "lastCode": "TASK_TIMEOUT"
+    },
+    "27,15,-8@0": {
+      "name": "black_stained_glass",
+      "fails": 1,
+      "lastCode": "NO_ACCESS"
+    },
+    "16,22,-79@0": {
+      "name": "lava",
+      "fails": 1,
+      "lastCode": "REFUSED"
+    },
+    "69,13,-21@0": {
+      "name": "oak_leaves",
+      "fails": 1,
+      "lastCode": "TASK_TIMEOUT"
+    },
+    "68,13,-26@0": {
+      "name": "oak_leaves",
+      "fails": 1,
+      "lastCode": "TASK_TIMEOUT"
+    },
+    "70,13,-51@0": {
+      "name": "oak_leaves",
+      "fails": 2,
+      "lastCode": "TASK_TIMEOUT"
+    }
+  },
+  "unsealNeeded": {}
+}

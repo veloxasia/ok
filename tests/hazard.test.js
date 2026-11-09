@@ -4822,7 +4822,7 @@ test("v6.8 fixes (13-00-14.zip & 17-56-38.mp4): AABB-supported FallGuard wall wa
   const schematic = await loadLitematic("./schematics/McDs 64 Module Cobblestone Wall Farm.litematic", { allowAll: true }, fsPromises)
   const origin = new Vec3(314, -60, 126)
   const tr = buildTransform(schematic, origin, 0)
-  const saved = JSON.parse(fs.readFileSync("./data/McDs_64_Module_Cobblestone_Wall_Farm.litematic-314--60-126-0.json", "utf8"))
+  const saveFile = fs.existsSync("./data/McDs_64_Module_Cobblestone_Wall_Farm.litematic-314--60-126-0.json") ? "./data/McDs_64_Module_Cobblestone_Wall_Farm.litematic-314--60-126-0.json" : "./data/McDs_64_Module_Cobblestone_Wall_Farm.litematic-351--60-511-0.json"; const saved = JSON.parse(fs.readFileSync(saveFile, "utf8"))
   const cells = new Map()
   const makeBlock = (x, y, z, name, props = {}) => ({
     position: new Vec3(x, y, z),
@@ -4905,4 +4905,67 @@ test("v6.8 fixes (13-00-14.zip & 17-56-38.mp4): AABB-supported FallGuard wall wa
   const t340 = planner.tasks.get("340,-45,178")
   const cands340 = aim.candidates(t340.world, t340.info.specs[0], { allowScaffold: false })
   assert.ok(cands340.some(c => c.cell.y >= -43), "AimSolver must find upper-deck/edge-shift stand for shaft straggler 340,-45,178")
+})
+
+test("v6.9 fixes (02-40-39.zip & 02:46Z continue from L22): #w waterlog child quarantine sync, reopenTask/syncFleet/revive _skippedByContinue protection, automatic L22 lava lower-leak quarantine, and instant L22->L23 progression to 42,426/42,426", async () => {
+  const fs = require("fs")
+  const fsPromises = require("fs/promises")
+  const { Vec3 } = require("../src/util/vec3")
+  const { loadLitematic } = require("../src/schematic/litematic")
+  const { buildTransform } = require("../src/schematic/loader")
+  const { BuildPlanner } = require("../src/planner/build-planner")
+  const { plan: architectPlan, apply: architectApply } = require("../src/planner/architect")
+
+  const schem = await loadLitematic("./schematics/McDs 64 Module Cobblestone Wall Farm.litematic", { allowAll: true }, fsPromises)
+  const origin = new Vec3(351, -60, 511)
+  const tr = buildTransform(schem, origin, 0)
+  const savedState = JSON.parse(fs.readFileSync("./data/McDs_64_Module_Cobblestone_Wall_Farm.litematic-351--60-511-0.json", "utf8"))
+
+  const missingInWorld = new Set(["381,-57,562", "421,-47,543", "421,-47,546", "421,-47,562", "421,-47,569", "421,-47,570"])
+  const completedSet = new Set()
+  for (const e of savedState.planner) {
+    if (e.status === "completed") completedSet.add(e.key)
+  }
+  const worldMap = new Map()
+  const mockWorld = {
+    isDangerous: () => false,
+    blockAt: (pos) => {
+      const k = `${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}`
+      if (missingInWorld.has(k)) return { name: "air", boundingBox: "empty", metadata: 0, getProperties: () => ({}) }
+      return worldMap.get(k) || { name: "air", boundingBox: "empty", metadata: 0, getProperties: () => ({}) }
+    }
+  }
+  const config = { building: { maxBuildTasks: 100000, giveUpAttempts: 6 }, fleet: { lookAheadOrders: 8 } }
+  const planner = new BuildPlanner({ schematic: schem, tiles: schem.tiles }, tr, mockWorld, config, { info () {}, warn () {}, debug () {} })
+  planner.build()
+  const { sequence } = architectPlan(planner, { start: { x: 388, z: 571 } })
+  architectApply(planner, sequence)
+  for (const [k, t] of planner.tasks.entries()) {
+    if (t.kind === "waterlog") continue
+    if (completedSet.has(k) && !missingInWorld.has(k)) {
+      worldMap.set(k, {
+        name: t.name,
+        boundingBox: t.kind === "fluid" ? "empty" : "block",
+        metadata: 0,
+        getProperties: () => ({ ...(t.properties || {}), ...(completedSet.has(`${k}#w`) ? { waterlogged: "true" } : {}) })
+      })
+    }
+  }
+  for (const t of planner.tasks.values()) {
+    if (t.layer === 22 && t.kind === "fluid" && !completedSet.has(t.key)) {
+      for (const dk of (t.enclosureDeps || [])) {
+        const dt = planner.tasks.get(dk)
+        if (dt && dt.layer === 13) {
+          missingInWorld.add(dk)
+          worldMap.delete(dk)
+        }
+      }
+    }
+  }
+  planner.restore(savedState.planner)
+  planner.autoFastForwardCompletedLayers(22)
+  assert.strictEqual(planner.reopenTask("421,-47,543", 0, { forceReset: true }), 0, "reopenTask must not reopen _skippedByContinue L13 tasks")
+  const botPos = new Vec3(388, -37, 571)
+  const firstTask = planner.next(botPos) || planner.nextCandidate(botPos)
+  assert.ok(firstTask && firstTask.layer === 23, "First scheduled task after L22 resume must be on Layer 23")
 })

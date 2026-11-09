@@ -1797,7 +1797,8 @@ class Placer {
         if (C.equals(task.world)) continue
         const plan = this.scaffold.planColumn(C, task.world, cell => this.isReservedCell(cell))
         if (!plan) { lastReason = `column at ${key(C)} blocked`; continue }
-        if ((task.bridgeAnchorKey || task.islandPrevKey || task.layer >= 12) && plan.info.height > 3) {
+        const maxAllowedTower = (task.attempts >= 1 || task.forceSupport) ? 14 : 8
+        if ((task.bridgeAnchorKey || task.islandPrevKey || task.layer >= 12) && plan.info.height > maxAllowedTower) {
           lastReason = `refusing ${plan.info.height}-block vertical tower for upper/bridge block ${key(task.world)}`
           continue
         }
@@ -2583,7 +2584,7 @@ class Placer {
           for (const lk of checkRes.leaks) {
             const lt = planner.tasks?.get(lk)
             if (lt && lt.kind === "block") {
-              if (planner.quarantined?.has(lk) || (lt.status === "blocked" && (lt.totalAttempts || 0) >= 2)) {
+              if (lt._skippedByContinue || (planner.minSkipLayer && lt.layer < planner.minSkipLayer) || lt.layer < task.layer - 2 || planner.quarantined?.has(lk) || (lt.status === "blocked" && (lt.totalAttempts || 0) >= 2)) {
                 hasQuarantinedLeak = true
                 continue
               }
@@ -2807,7 +2808,7 @@ class Placer {
           for (const lk of fc.leaks) {
             const lt = planner.tasks?.get(lk)
             if (lt && lt.kind === "block") {
-              if (planner.quarantined?.has(lk) || (lt.status === "blocked" && (lt.totalAttempts || 0) >= 2)) {
+              if (lt._skippedByContinue || (planner.minSkipLayer && lt.layer < planner.minSkipLayer) || lt.layer < task.layer - 2 || planner.quarantined?.has(lk) || (lt.status === "blocked" && (lt.totalAttempts || 0) >= 2)) {
                 hasQuarantinedLeak = true
                 continue
               }

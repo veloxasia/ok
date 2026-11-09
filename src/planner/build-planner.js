@@ -164,6 +164,26 @@ class BuildPlanner {
 
   ownCount () { let n = 0; for (const t of this.tasks.values()) if (t.owner === this.fleet?.index) n++; return n }
 
+  quarantineTask (task, reason = null) {
+    if (!task || task.status === "completed") return
+    if (!this.quarantined) this.quarantined = new Set()
+    this.quarantined.add(task.key)
+    this.blocked.add(task.key)
+    task.quarantinedAt = Date.now()
+    task._quarantineMask = this.neighborSolidMask(task.world)
+    if (reason) task.lastError = String(reason)
+    this.setStatus(task, "blocked")
+    if (task.kind === "block" && task.info?.waterlogged) {
+      const wl = this.tasks.get(`${task.key}#w`)
+      if (wl && wl.status !== "completed") {
+        this.quarantined.add(wl.key)
+        this.blocked.add(wl.key)
+        wl.quarantinedAt = task.quarantinedAt
+        this.setStatus(wl, "blocked")
+      }
+    }
+  }
+
   syncFleet () {
     const f = this.fleet
     if (!f) return
@@ -173,22 +193,25 @@ class BuildPlanner {
       if (e.quarantine) {
         const t = this.tasks.get(e.key)
         if (t && t.status !== "completed" && !this.isCorrect(t)) {
-          this.setStatus(t, "blocked")
-          this.blocked.add(t.key)
-          if (!this.quarantined) this.quarantined = new Set()
-          this.quarantined.add(t.key)
+          if (t._skippedByContinue || (this.minSkipLayer && t.layer < this.minSkipLayer)) continue
+          this.quarantineTask(t)
         }
         continue
       }
       if (e.reopen) {
         const t = this.tasks.get(e.key)
         if (t && !this.isCorrect(t)) {
+          if ((t._skippedByContinue || (this.minSkipLayer && t.layer < this.minSkipLayer)) && !e.forceUnquarantine) continue
           if (this.quarantined?.has(t.key) && !e.forceUnquarantine) continue
+          if (t.kind === "waterlog") {
+            const parent = this.tasks.get(t.parentKey)
+            if (!parent || parent.status !== "completed") continue
+          }
           t.deferredUntil = 0
           t.anyUntil = 0
-          if (e.ownerIndex != null && t.status !== 'completed') {
-            t.attempts = 3
-            t.totalAttempts = Math.max(t.totalAttempts || 0, 3)
+          if (e.ownerIndex != null && t.status !== "completed") {
+            t.attempts = Math.min(t.attempts || 0, 1)
+            t.totalAttempts = Math.min(t.totalAttempts || 0, 2)
             t.forceSupport = true
             t.hintFailed = true
           } else {
@@ -198,27 +221,32 @@ class BuildPlanner {
           if (e.ownerIndex != null) t.owner = e.ownerIndex
           this.blocked.delete(t.key)
           this.quarantined?.delete(t.key)
-          this.setStatus(t, 'pending')
+          this.setStatus(t, "pending")
         }
         continue
       }
       if (e.id === f.id) continue
       const t = this.tasks.get(e.key)
-      if (t && t.status !== 'completed') { t.deferredUntil = 0; this.blocked.delete(t.key); this.quarantined?.delete(t.key); this.setStatus(t, 'completed') }
+      if (t && t.status !== "completed") { t.deferredUntil = 0; this.blocked.delete(t.key); this.quarantined?.delete(t.key); this.setStatus(t, "completed") }
     }
   }
 
   reopenTask (keyOrPos, claimOwnerIndex = null, { forceReset = false, forceUnquarantine = false } = {}) {
-    const baseKey = typeof keyOrPos === 'string'
-      ? keyOrPos.replace(/#w$/, '')
+    const baseKey = typeof keyOrPos === "string"
+      ? keyOrPos.replace(/#w$/, "")
       : `${Math.floor(keyOrPos.x)},${Math.floor(keyOrPos.y)},${Math.floor(keyOrPos.z)}`
     let reopened = 0
     for (const k of [baseKey, `${baseKey}#w`]) {
       const t = this.tasks.get(k)
       if (!t) continue
+      if ((t._skippedByContinue || (this.minSkipLayer && t.layer < this.minSkipLayer)) && !forceUnquarantine) continue
       if (this.isCorrect(t)) continue
       if (this.quarantined?.has(t.key) && !forceUnquarantine) continue
-      const wasCompleted = t.status === 'completed'
+      if (t.kind === "waterlog") {
+        const parent = this.tasks.get(t.parentKey)
+        if (!parent || parent.status !== "completed") continue
+      }
+      const wasCompleted = t.status === "completed"
       if (wasCompleted || forceReset) {
         t.deferredUntil = 0
         t.anyUntil = 0
@@ -230,7 +258,7 @@ class BuildPlanner {
       if (newOwner != null) t.owner = newOwner
       this.blocked.delete(t.key)
       this.quarantined?.delete(t.key)
-      this.setStatus(t, 'pending')
+      this.setStatus(t, "pending")
       if (this.fleet && (wasCompleted || forceReset)) this.fleet.coord.reopen?.(t.key, this.fleet.id, newOwner)
       reopened++
     }
@@ -1776,7 +1804,6 @@ class BuildPlanner {
     const group = this.orderGroups.get(task.order)
     if (group) {
       const set = group.cells.get(task.cellKey)
-      const wasClosed = was === 'completed' || was === 'blocked'
       const isClosed = status === 'completed' || status === 'blocked'
       if (status === 'completed') {
         if (!this.completed.has(task.key)) {
@@ -1790,30 +1817,51 @@ class BuildPlanner {
           (this.completedNonBandByLayer ||= new Map()).set(task.layer, Math.max(0, (this.completedNonBandByLayer.get(task.layer) || 0) - 1))
         }
       }
-      if (isClosed && !wasClosed) {
-        group.remaining -= 1
-        set?.delete(task)
-      } else if (!isClosed && wasClosed) {
-        group.seqPtr = 0
-        if (group.clusters && task.verticalClusterId != null && group.clusters[task.verticalClusterId]) {
-          group.clusters[task.verticalClusterId].ptr = 0
+      if (isClosed) {
+        if (set && set.delete(task)) {
+          group.remaining = Math.max(0, group.remaining - 1)
         }
-        group.remaining += 1
-        if (set) set.add(task)
-        else group.cells.set(task.cellKey, new Set([task]))
+      } else {
+        if (!set) {
+          group.cells.set(task.cellKey, new Set([task]))
+          group.remaining += 1
+          group.seqPtr = 0
+          if (group.clusters && task.verticalClusterId != null && group.clusters[task.verticalClusterId]) {
+            group.clusters[task.verticalClusterId].ptr = 0
+          }
+        } else if (!set.has(task)) {
+          set.add(task)
+          group.remaining += 1
+          group.seqPtr = 0
+          if (group.clusters && task.verticalClusterId != null && group.clusters[task.verticalClusterId]) {
+            group.clusters[task.verticalClusterId].ptr = 0
+          }
+        }
       }
     }
     // Always sync dependent waterlog child (`#w`) when a waterlogged block parent is blocked, reopened, or completed!
     if (task.kind === 'block' && task.info?.waterlogged) {
       const wl = this.tasks.get(`${task.key}#w`)
       if (wl && wl.status !== 'completed') {
-        if (status === 'blocked' && wl.status !== 'blocked') {
+        if (status === 'blocked') {
           this.blocked.add(wl.key)
-          this.setStatus(wl, 'blocked')
-        } else if ((status === 'pending' || status === 'completed') && (wl.status === 'blocked' || wl.status === 'deferred')) {
-          this.blocked.delete(wl.key)
-          wl.deferredUntil = 0
-          this.setStatus(wl, 'pending')
+          if (this.quarantined?.has(task.key)) {
+            this.quarantined.add(wl.key)
+            wl.quarantinedAt = task.quarantinedAt || Date.now()
+          }
+          if (wl.status !== 'blocked') this.setStatus(wl, 'blocked')
+        } else if (status === 'completed' && (wl.status === 'blocked' || wl.status === 'deferred')) {
+          if (task._skippedByContinue) {
+            wl._skippedByContinue = true
+            this.blocked.delete(wl.key)
+            this.quarantined?.delete(wl.key)
+            this.setStatus(wl, 'completed')
+          } else {
+            this.blocked.delete(wl.key)
+            this.quarantined?.delete(wl.key)
+            wl.deferredUntil = 0
+            this.setStatus(wl, 'pending')
+          }
         }
       }
     }
@@ -2320,6 +2368,26 @@ class BuildPlanner {
       const parent = this.tasks.get(task.parentKey)
       if (!parent || parent.status !== 'completed') return false
     }
+    if (task.kind === 'fluid' && !task.fluidForce && this.remainingCount() > 25 && this.world?.blockAt?.(task.world)) {
+      const fc = this.fluidCheck(task)
+      if (fc?.blocked && Array.isArray(fc.leaks) && fc.leaks.length > 0) {
+        const hasUnsealableLowerLeak = fc.leaks.some(lk => {
+          const lt = this.tasks.get(lk)
+          if (!lt) return false
+          if (this.quarantined?.has(lk) || (lt.status === 'blocked' && (lt.totalAttempts || 0) >= 2)) return true
+          if (lt._skippedByContinue || (this.minSkipLayer && lt.layer < this.minSkipLayer) || lt.layer < task.layer - 2) {
+            const lb = this.world.blockAt(lt.world)
+            return Boolean(lb && !taskMatches(lb, lt))
+          }
+          return false
+        })
+        if (hasUnsealableLowerLeak) {
+          this.quarantineTask(task, `enclosure leak on lower/skipped layer (${fc.why})`)
+          if (this.fleet) this.fleet.coord.quarantine?.(task.key, this.fleet.id)
+          return false
+        }
+      }
+    }
     if (task.order < 88000 && (task.name === 'redstone_block' || task.name === 'redstone_wire' || task.name === 'tnt')) {
       const tx = task.world.x; const ty = task.world.y; const tz = task.world.z
       if (task.name === 'redstone_block') {
@@ -2366,7 +2434,13 @@ class BuildPlanner {
     if (!group || group.remaining <= 0) return false
     for (const set of group.cells.values()) {
       for (const t of set) {
-        if ((t.kind === 'block' || t.kind === 'fluid' || t.kind === 'waterlog') && t.status !== 'completed' && t.status !== 'blocked') return true
+        if ((t.kind === 'block' || t.kind === 'fluid' || t.kind === 'waterlog') && t.status !== 'completed' && t.status !== 'blocked') {
+          if (t.kind === 'waterlog') {
+            const parent = this.tasks.get(t.parentKey)
+            if (!parent || parent.status !== 'completed') continue
+          }
+          return true
+        }
       }
     }
     return false
@@ -2463,6 +2537,10 @@ class BuildPlanner {
     for (const set of group.cells.values()) {
       for (const t of set) {
         if (t.status !== 'completed' && t.status !== 'blocked' && (t.attempts || 0) < maxAttempts) {
+          if (t.kind === 'waterlog') {
+            const parent = this.tasks.get(t.parentKey)
+            if (!parent || parent.status !== 'completed') continue
+          }
           if (t.name === 'observer' && (t.properties?.facing === 'down' || t.properties?.facing === 'up')) continue
           if (this.hasDirectlyUnfinishedBelow(t)) continue
           if (this.fleet && group.remaining <= 4 && this.fleet.coord.busyFor(this.fleet.id, t, false)) continue
@@ -2862,7 +2940,7 @@ class BuildPlanner {
       if (order >= 88000 && this.phaseBlocked(order)) continue
       const layer = order < 88000 ? Math.floor(order / 4) : 9999
       const hasUsable = this.groupHasUsableNow(group, now)
-      const isRetriedStragglerGroup = hasUsable && !group.isVerticalWallBand && !group.isModuleClusterBase && !group.hasDependentCapOrder && layer < 9999 && (
+      const isRetriedStragglerGroup = this.remainingCount() > 25 && hasUsable && !group.isVerticalWallBand && !group.isModuleClusterBase && !group.hasDependentCapOrder && layer < 9999 && (
         (group.remaining <= 2 && !this.groupHasUnfinishedBelowMaxAttempts(group, 2)) ||
         (group.remaining <= 4 && (!this.groupHasUnfinishedBelowMaxAttempts(group, 1) || this.hasHigherLayerProgress(layer, 20)))
       )
@@ -3005,7 +3083,7 @@ class BuildPlanner {
       if (order >= 88000 && this.phaseBlocked(order)) continue
       const layer = order < 88000 ? Math.floor(order / 4) : 9999
       const hasUsable = this.groupHasUsableNow(group, now)
-      const isRetriedStragglerGroup = hasUsable && !group.hasDependentCapOrder && layer < 9999 && (
+      const isRetriedStragglerGroup = this.remainingCount() > 25 && hasUsable && !group.hasDependentCapOrder && layer < 9999 && (
         (group.remaining <= 2 && !this.groupHasUnfinishedBelowMaxAttempts(group, 2)) ||
         (group.remaining <= 4 && (!this.groupHasUnfinishedBelowMaxAttempts(group, 1) || this.hasHigherLayerProgress(layer, 20)))
       )
@@ -3061,7 +3139,7 @@ class BuildPlanner {
       const g = this.orderGroups.get(order)
       if (!g || g.remaining <= 0) continue
       const l = order < 88000 ? Math.floor(order / 4) : 9999
-      const isStragglerGrp = order < 88000 && !g.hasDependentCapOrder && (
+      const isStragglerGrp = this.remainingCount() > 25 && order < 88000 && !g.hasDependentCapOrder && (
         (g.remaining <= 2 && !this.groupHasUnfinishedBelowMaxAttempts(g, 2)) ||
         (g.remaining <= 4 && (!this.groupHasUnfinishedBelowMaxAttempts(g, 1) || this.hasHigherLayerProgress(l, 20)))
       )
@@ -3141,12 +3219,7 @@ class BuildPlanner {
       if (error?.code === 'UNSAFE') {
         task.unsafeCount = (task.unsafeCount || 0) + 1
         if (error.quarantinedLeak || task.unsafeCount >= 6) {
-          this.setStatus(task, 'blocked')
-          this.blocked.add(task.key)
-          if (!this.quarantined) this.quarantined = new Set()
-          this.quarantined.add(task.key)
-          task.quarantinedAt = Date.now()
-          task._quarantineMask = this.neighborSolidMask(task.world)
+          this.quarantineTask(task)
           if (this.fleet) this.fleet.coord.quarantine?.(task.key, this.fleet.id)
           this.logger?.warn?.(`QUARANTINE: ${task.name}@${task.key} quarantined because enclosure leak is quarantined/unsealed (${task.lastError}); queued for end-of-build verify-and-repair pass`)
           return
@@ -3170,23 +3243,18 @@ class BuildPlanner {
     const giveUp = isHardNoAccess
       ? 2
       : (this.remainingCount() > 35 ? 3 : Math.min(6, Math.max(4, Number(this.config.building.giveUpAttempts || 6))))
-    if (task.attempts === 3 && task.totalAttempts === 3) {
+    if (task.attempts === 2 && task.totalAttempts === 2 && giveUp >= 3) {
       task.forceSupport = true
       task.hintFailed = true
       if (this.fleet && this.fleet.count > 1) {
         const nextOwner = ((task.owner ?? this.fleet.index) + 1) % this.fleet.count
         task.owner = nextOwner
         this.fleet.coord.reopen?.(task.key, this.fleet.id, nextOwner)
-        this.logger?.info?.(`QUARANTINE-HANDOFF: ${task.name}@${task.key} failed 3x; handing off to worker #${nextOwner + 1} with extra support enabled`)
+        this.logger?.info?.(`QUARANTINE-HANDOFF: ${task.name}@${task.key} failed 2x; handing off to worker #${nextOwner + 1} with extra support enabled`)
       }
     }
     if (task.attempts >= giveUp || (task.totalAttempts || 0) >= giveUp) {
-      this.setStatus(task, 'blocked')
-      this.blocked.add(task.key)
-      if (!this.quarantined) this.quarantined = new Set()
-      this.quarantined.add(task.key)
-      task.quarantinedAt = Date.now()
-      task._quarantineMask = this.neighborSolidMask(task.world)
+      this.quarantineTask(task)
       if (this.fleet) this.fleet.coord.quarantine?.(task.key, this.fleet.id)
       this.logger?.warn?.(`QUARANTINE: ${task.name}@${task.key} quarantined after ${task.totalAttempts || task.attempts} attempts (${task.lastError}); queued for end-of-build verify-and-repair pass`)
       return
@@ -3223,21 +3291,23 @@ class BuildPlanner {
     return m
   }
 
-  revive ({ includeQuarantined = false, includeExpiredQuarantined = true, onlyQuarantined = false } = {}) {
+  revive ({ includeQuarantined = false, includeExpiredQuarantined = false, onlyQuarantined = false } = {}) {
     let n = 0
     const now = Date.now()
     const isEndgame = this.remainingCount() <= 25
     for (const t of this.tasks.values()) {
       if (t.status === 'completed') continue
+      if ((t._skippedByContinue || (this.minSkipLayer && t.layer < this.minSkipLayer)) && !includeQuarantined) continue
+      if (t.kind === 'waterlog') {
+        const parent = this.tasks.get(t.parentKey)
+        if (!parent || parent.status !== 'completed') continue
+      }
       const isQuarantined = Boolean(this.quarantined?.has(t.key))
       if (onlyQuarantined && !isQuarantined) continue
       if (isQuarantined) {
+        if (!includeQuarantined && !isEndgame) continue
         const expired = includeExpiredQuarantined && (now - (t.quarantinedAt || 0) >= 30_000)
-        if (!includeQuarantined && !expired) continue
-        if (!isEndgame && !includeQuarantined) {
-          if ((t.quarantineRevives || 0) >= 1) continue
-          if (t._quarantineMask !== undefined && this.neighborSolidMask(t.world) === t._quarantineMask) continue
-        }
+        if (!includeQuarantined && !isEndgame && !expired) continue
       }
       if (t.status === 'blocked' || t.status === 'deferred' || t.status === 'failed' || (t.anyUntil || 0) > 0) {
         if (t.status === 'blocked') this.blocked.delete(t.key)
@@ -3386,19 +3456,19 @@ class BuildPlanner {
   skipLayersBelow (minLayer) {
     const targetLayer = Number(minLayer)
     if (!Number.isFinite(targetLayer) || targetLayer <= 0) return 0
+    this.minSkipLayer = Math.max(this.minSkipLayer || 0, targetLayer)
     let skipped = 0
-    const completedKeys = []
     for (const task of this.tasks.values()) {
       const effLayer = task.order >= 88000 && task.order < 90000
         ? Math.floor(task.order - 88000)
         : task.layer
       if (effLayer < targetLayer) {
         task._skippedByContinue = true
+        this.blocked.delete(task.key)
+        this.quarantined?.delete(task.key)
         if (task.status !== "completed") {
           this.setStatus(task, "completed")
-          this.blocked.delete(task.key)
-          this.quarantined?.delete(task.key)
-          completedKeys.push(task.key)
+          if (this.fleet) this.fleet.coord?.complete?.(task.key, this.fleet.id)
           skipped++
         }
       }

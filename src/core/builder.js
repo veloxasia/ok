@@ -1059,7 +1059,7 @@ class ConstructionEngine {
       const l = layers.get(t.layer) || { total: 0, done: 0, pending: [], structPending: [], fluid: 0, fluidDone: 0 }
       l.total++
       if (t.status === 'completed') l.done++
-      else {
+      else if (t.status !== 'blocked' && !planner.quarantined?.has(t.key)) {
         const desc = `${t.name}@${t.world.x},${t.world.y},${t.world.z}:${t.status}${t.attempts ? '/' + t.attempts : ''}${t.lastError ? '(' + String(t.lastError).slice(0, 40) + ')' : ''}`
         if (l.pending.length < 3) l.pending.push(desc)
         if (t.order < 88000 && l.structPending.length < 3) l.structPending.push(desc)
@@ -1132,7 +1132,8 @@ class ConstructionEngine {
     if (final.wrong > 0 && (this.verifyRepairRounds = (this.verifyRepairRounds || 0) + 1) <= (force ? 1 : 3)) {
       let reopened = 0
       for (const wt of final.wrongTasks) {
-        reopened += this.planner.reopenTask(wt.key, this.fleet ? (reopened % this.fleet.count) : null, { forceReset: true })
+        if (wt._skippedByContinue) continue
+        reopened += this.planner.reopenTask(wt.key, this.fleet ? (reopened % this.fleet.count) : null, { forceReset: true, forceUnquarantine: true })
       }
       if (reopened > 0) {
         if (this.fleet) this.fleet.coord.setDone(this.fleet.id, false)

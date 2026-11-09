@@ -509,6 +509,7 @@ class AimSolver {
       if (ub && isAirLike(ub) && !this.isReserved(under) && !this.lavaNear(under) && !(target && under.equals(target))) {
         let hasAnchor = false
         let hasWalkAdjacent = false
+        let bestWalkStand = null
         const botY = this.bot?.entity?.position?.y
         for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
           const nb = this.world.blockAt(under.offset(dx, 0, dz))
@@ -518,13 +519,14 @@ class AimSolver {
               const adjStand = cell.offset(dx, dy, dz)
               if (this.standOk(adjStand, cache) && (botY == null || Math.abs(botY - adjStand.y) <= 3.5)) {
                 hasWalkAdjacent = true
+                if (!bestWalkStand) bestWalkStand = adjStand
                 break
               }
             }
           }
         }
         if (hasAnchor && hasWalkAdjacent) {
-          res = { floor: under, height: 1, ledge: under }
+          res = { floor: under, height: 1, ledge: under, walkStand: bestWalkStand }
         }
       }
       if (!res && !this.isHazard(cell) && !this.isHazard(cell.offset(0, -1, 0)) && !this.noScaffold?.(cell) && !this.noScaffold?.(cell.offset(0, -1, 0))) {
@@ -619,7 +621,7 @@ class AimSolver {
     const dir = d.scaled(1 / len)
     const outlineBlocker = this.rayOutlineBlocker(eye, dir, len, refPos, ignorePos)
     if (outlineBlocker) return false
-    const b = this.bot.world.raycast(eye, dir, len + 0.8)
+    const b = this.bot.world?.raycast?.(eye, dir, len + 0.8) || null
     const refBlock = this.world.blockAt(refPos)
     if (b && b.position && b.position.x === refPos.x && b.position.y === refPos.y && b.position.z === refPos.z) {
       if (b.face !== FACE_INDEX[faceName]) return false
@@ -642,7 +644,9 @@ class AimSolver {
     const bot = this.bot
     const origin = (opts.from || bot.entity.position).floored()
     const maxOut = opts.max ?? 8
-    const stages = opts.stages || [{ r: 4, down: 3, up: 2, aroundTarget: true }, { r: 5, down: 5, up: 3, aroundTarget: true }]
+    const stages = opts.stages || (opts.bucket
+      ? [{ r: 4, down: 3, up: 4, aroundTarget: true }, { r: 5, down: 5, up: 4, aroundTarget: true }]
+      : [{ r: 4, down: 3, up: 2, aroundTarget: true }, { r: 5, down: 5, up: 3, aroundTarget: true }])
     const stageResults = []
     const cache = new Map()
     if (!opts.onlyScaffold) {
@@ -731,7 +735,7 @@ class AimSolver {
             if (spec.look === 'up' && S.y >= target.y) continue
             if (!self && this.isAimBlacklisted(target, faceOpt.f, S)) continue
             if (opts.fixedStand && !(S.x === opts.fixedStand.x && S.y === opts.fixedStand.y && S.z === opts.fixedStand.z)) continue
-            const effMinDist = (opts.bucket && S.y >= target.y + 1 && opts.minStandDist <= 1.6) ? 0.95 : opts.minStandDist
+            const effMinDist = (opts.bucket && S.y >= target.y + 1) ? 0.95 : opts.minStandDist
             if (effMinDist && Math.abs(S.y - target.y) <= 3 && Math.hypot(S.x + 0.5 - (target.x + 0.5), S.z + 0.5 - (target.z + 0.5)) < effMinDist) continue
             crowd = 0
             if (others) { let near = 99; for (const o of others) { if (Math.abs(o.y - S.y) <= 2.2) near = Math.min(near, Math.hypot(o.x - (S.x + 0.5), o.z - (S.z + 0.5))) } if (near < 1.4) continue; if (near < 2.6) crowd = 6 }
@@ -767,7 +771,8 @@ class AimSolver {
             const adjLavaDrop = !virtual && [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([lx, lz]) => {
               const b0 = this.world.blockAt(S.offset(lx, 0, lz))
               const b1 = this.world.blockAt(S.offset(lx, -1, lz))
-              return (!b0 || b0.boundingBox !== 'block') && (b0?.name === 'lava' || b1?.name === 'lava')
+              const b2 = this.world.blockAt(S.offset(lx, -2, lz))
+              return (!b0 || b0.boundingBox !== 'block') && (b0?.name === 'lava' || b1?.name === 'lava' || ((!b1 || b1.boundingBox !== 'block') && b2?.name === 'lava'))
             })
             let found = false
             for (const [sx, sz] of shifts) {

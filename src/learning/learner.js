@@ -7,6 +7,7 @@
 
 const fs = require('fs')
 const path = require('path')
+const BAKED_PRIORS = require('./baked-priors')
 
 // Context-dependent rules whose validity depends on which neighboring blocks are already placed at runtime
 // (e.g. double-chest partner rules or trapdoor floor vs side mounting) must NEVER be saved as global
@@ -26,7 +27,7 @@ class OrientationLearner {
   }
 
   load () {
-    this.preferred = {}
+    this.preferred = { ...(BAKED_PRIORS.preferredOrientation || {}) }
     for (const f of [this.baseFile, this.file]) {
       try {
         if (f && fs.existsSync(f)) {
@@ -117,6 +118,12 @@ class Experience {
   }
 
   load () {
+    for (const [k, v] of Object.entries(BAKED_PRIORS.experience?.stats || {})) {
+      this.stats[k] = { ok: v.ok || 0, fail: v.fail || 0 }
+    }
+    if (BAKED_PRIORS.experience?.far) {
+      this.far = { ok: BAKED_PRIORS.experience.far.ok || 0, fail: BAKED_PRIORS.experience.far.fail || 0 }
+    }
     try {
       const d = JSON.parse(fs.readFileSync(fs.existsSync(this.file) ? this.file : this.baseFile, 'utf8'))
       if (Number(d.version || 0) >= CURRENT_EXPERIENCE_VERSION) {
@@ -265,6 +272,13 @@ class BuildMemory {
   }
 
   load () {
+    const bakedSchem = BAKED_PRIORS.schematics?.[this.safeName]
+    if (bakedSchem) {
+      this._mergeFrom({ version: CURRENT_MEMORY_VERSION, ...bakedSchem })
+    }
+    if (BAKED_PRIORS.universalPatterns) {
+      this.universal = { version: 2, patterns: JSON.parse(JSON.stringify(BAKED_PRIORS.universalPatterns)) }
+    }
     for (const f of [this.file, this.portableFile]) {
       try {
         if (f && fs.existsSync(f)) {
@@ -276,7 +290,7 @@ class BuildMemory {
     try {
       if (fs.existsSync(this.universalFile)) {
         const u = JSON.parse(fs.readFileSync(this.universalFile, 'utf8'))
-        this.universal = { version: 2, patterns: u.patterns || {} }
+        this.universal = { version: 2, patterns: { ...(this.universal?.patterns || {}), ...(u.patterns || {}) } }
         for (const pk of Object.keys(this.universal.patterns)) {
           const spTag = this.universal.patterns[pk]?.specTag
           if (spTag && CONTEXT_DEPENDENT_TAGS.has(spTag)) {

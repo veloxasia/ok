@@ -474,13 +474,16 @@ class Brain {
     const underFeetTask = this.bot?.builder?.planner?.tasks?.get(`${me.x},${me.y - 1},${me.z}`)
     const onIsolatedCol = Boolean(underFeetTask?.isolatedColumn || underFeetTask?.verticalColumn || underFeetTask?.verticalAnchorCol || this.scaffold?.onScaffold?.())
     const blockedFn = (x, y, z) => !(x === me.x && z === me.z && (y === me.y || y === me.y + 1)) && this.isBlockedCell(x, y, z)
-    // Never treat a ground stand > maxDrop (4+ blocks) below an elevated build deck as walkable on foot (prevents one-way cliff drops to y=-60)!
-    if (!onIsolatedCol && me.y - s.y > maxDrop) {
+    const baseY0 = this.bot?.builder?.planner?.box?.y0 ?? -60
+    const isEndgame = (this.bot?.builder?.planner?.remainingCount?.() ?? 999) <= 150
+    // Reject one-way cliff drops to ground level (y <= baseY0 + 1) when on an upper deck (> maxDrop above ground),
+    // while allowing stepped staircase/terrace descent between upper build decks (e.g. L29 roof -> L23 deck)!
+    if (!onIsolatedCol && !isEndgame && me.y - s.y > maxDrop && s.y <= baseY0 + 1) {
       return { verdict: 'no', region: needRegion ? regionOf(this.blockAt.bind(this), s, 600, 1, blockedFn) : null }
     }
     const effDrop = onIsolatedCol
       ? Math.max(maxDrop, 4)
-      : ((s.y <= me.y - 2 && !this.isTaskCell(s.x, s.y, s.z) && !this.isTaskCell(s.x, s.y + 1, s.z)) ? maxDrop : 1)
+      : ((s.y <= me.y - 2 && (isEndgame || s.y >= baseY0 + 2 || (!this.isTaskCell(s.x, s.y, s.z) && !this.isTaskCell(s.x, s.y + 1, s.z)))) ? Math.min(maxDrop, 2) : 1)
     const fw = this.getForwardReach(me, effDrop, blockedFn)
     const g = fw.graph
     if (!fw.start) {
@@ -563,8 +566,10 @@ class Brain {
     }
     const underFeetTask = this.bot?.builder?.planner?.tasks?.get(`${me.x},${me.y - 1},${me.z}`)
     const onIsolatedCol = Boolean(underFeetTask?.isolatedColumn || underFeetTask?.verticalAnchorCol || wasOnScaffold || this.scaffold?.onScaffold?.())
-    // Never pearl or dig downward off an elevated deck/roof (`me.y >= stand.y + 3`) unless descending a finished isolated/scaffold column!
-    if (me.y >= Math.floor(stand.y) + 3 && !onIsolatedCol) {
+    const baseY0 = this.bot?.builder?.planner?.box?.y0 ?? -60
+    const isEndgame = (this.bot?.builder?.planner?.remainingCount?.() ?? 999) <= 150
+    // Never pearl or dig downward off an elevated deck/roof to ground level unless descending a finished isolated/scaffold column or during endgame repair!
+    if (me.y >= Math.floor(stand.y) + 3 && !onIsolatedCol && !isEndgame && Math.floor(stand.y) <= baseY0 + 2) {
       return false
     }
     const b = boundsOf(region.cells, 48)

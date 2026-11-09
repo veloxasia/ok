@@ -200,9 +200,11 @@ class Placer {
         this._reach = this._reach || new Map()
         for (const c of candidates) {
           try {
-            const walkStand = c.scaffold?.floor
-              ? new Vec3(c.scaffold.floor.x + 0.5, c.scaffold.floor.y, c.scaffold.floor.z + 0.5)
-              : (c.edge && c.cell ? new Vec3(c.cell.x + 0.5, c.stand.y, c.cell.z + 0.5) : c.stand)
+            const walkStand = c.scaffold?.walkStand
+              ? new Vec3(c.scaffold.walkStand.x + 0.5, c.scaffold.walkStand.y, c.scaffold.walkStand.z + 0.5)
+              : (c.scaffold?.floor
+                  ? new Vec3(c.scaffold.floor.x + 0.5, c.scaffold.floor.y, c.scaffold.floor.z + 0.5)
+                  : (c.edge && c.cell ? new Vec3(c.cell.x + 0.5, c.stand.y, c.cell.z + 0.5) : c.stand))
             if (this.isDeadStand(walkStand)) {
               c._reachVerdict = 'no'
               c.cost += 55
@@ -551,6 +553,7 @@ class Placer {
 
   walkStandOf (c) {
     if (!c) return null
+    if (c.scaffold?.walkStand) return new Vec3(c.scaffold.walkStand.x + 0.5, c.scaffold.walkStand.y, c.scaffold.walkStand.z + 0.5)
     if (c.scaffold?.floor) return new Vec3(c.scaffold.floor.x + 0.5, c.scaffold.floor.y, c.scaffold.floor.z + 0.5)
     if (c.edge && c.cell) return new Vec3(c.cell.x + 0.5, c.stand.y, c.cell.z + 0.5)
     return c.stand
@@ -1134,10 +1137,7 @@ class Placer {
     try {
       const standVec = new Vec3(standAbove.x + 0.5, standAbove.y, standAbove.z + 0.5)
       if (this.isDeadStand(standVec)) return false
-      if (this.brain && this.brain.reachability(standVec).verdict === 'no') {
-        return false
-      }
-      const simCands = this.aim.candidates(task.world, spec, { fixedStand: standAbove, allowScaffold: false })
+      const simCands = this.aim.candidates(task.world, spec, { fixedStand: standAbove, allowScaffold: false, allowEdgeShift: true })
       return simCands.length > 0
     } finally {
       this.world.blockAt = origWorldBlockAt
@@ -1285,8 +1285,12 @@ class Placer {
         const targetStand = localStands[0]
         const prep = await this.brain.prepare(targetStand, { force: true }).catch(() => 'no')
         this.invalidateWorldCaches()
+        if (prep === 'no' && this.reachVerdict(targetStand) === 'no') {
+          await this.nav.goTo(targetStand, 2.5, 10_000, { human: true, work: true, rescue: true }).catch(() => {})
+          this.invalidateWorldCaches()
+        }
         this.setPhase('providing a reference block (support)')
-        if (prep === 'no' && this.reachVerdict(targetStand) === 'no' && this.bot.entity.position.distanceTo(task.world) > 6.5) {
+        if (this.reachVerdict(targetStand) === 'no' && this.bot.entity.position.distanceTo(task.world) > 6.5) {
           throw new BuildError('NO_ACCESS', `no physical access to region around ${key(task.world)}`)
         }
       }
@@ -1362,10 +1366,12 @@ class Placer {
           const standAbove = L.offset(0, 1, 0)
           if (!isBodyFree(this.world.blockAt(standAbove)) || !isBodyFree(this.world.blockAt(standAbove.offset(0, 1, 0)))) continue
           if (!this.hasSolidNeighbor(L, task.world)) continue
-          if (!this.aim.candidates(L, FREE, { allowScaffold: false }).some(c => !this.brain || this.reachVerdict(c.stand) !== 'no')) continue
+          if (!this.aim.candidates(L, FREE, { allowScaffold: false, allowEdgeShift: true }).some(c => !this.brain || this.reachVerdict(this.walkStandOf(c)) !== 'no')) continue
           if (!this.canPlaceFromSimulatedLedge(L, standAbove, task, primarySpec)) continue
           try {
-            await this.placeTempBlock(L, { allowScaffold: false })
+            await this.placeTempBlock(L, { allowScaffold: false, allowEdgeShift: true })
+            const recL = this.scaffold?.created?.get(key(L))
+            if (recL) { recL.isLookUpLedge = true; this.scaffold.created.set(key(L), recL) }
             task._preferredStand = standAbove
             this.logger.info(`SUPPORT: placed temporary standing ledge at ${key(L)} for look-up ${task.name}@${key(task.world)}`)
             return [L]
@@ -2090,15 +2096,26 @@ class Placer {
     if (unsafe) throw new BuildError('UNSAFE', `not placing TNT at ${key(task.world)}: ${unsafe}`)
     await this.clearCell(task)
     if (task.kind === 'block' && task.info?.specs?.[0]?.look !== 'up') {
-      const aboveCell = task.world.offset(0, 1, 0)
-      const ak = key(aboveCell)
-      const aboveTask = this.planner?.tasks?.get(ak)
-      const isTempAbove = this.scaffold?.created?.has(ak) || this.planner?.isTempCell?.(aboveCell.x, aboveCell.y, aboveCell.z)
-      if (isTempAbove && (!aboveTask || aboveTask.kind === 'fluid' || aboveTask.status !== 'completed')) {
-        const ab = this.world.blockAt(aboveCell)
-        if (ab && !isAirLike(ab) && !this.fluidBeside(aboveCell, true)) {
-          await this.digBlock(aboveCell, { allowScaffold: false }).catch(() => {})
+      const checkCells = [task.world.offset(0, 1, 0)]
+      if (task.order >= 88000 || /^(piston|sticky_piston|tnt|observer|slime_block|redstone_torch|redstone_wall_torch)$/.test(task.name || '')) {
+        for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [1, 1, 0], [-1, 1, 0], [0, 1, 1], [0, 1, -1]]) {
+          checkCells.push(task.world.offset(dx, dy, dz))
+        }
+      }
+      const mePos = this.bot?.entity?.position
+      for (const adjCell of checkCells) {
+        const ak = key(adjCell)
+        const adjTask = this.planner?.tasks?.get(ak)
+        const isTempAdj = this.scaffold?.created?.has(ak) || this.planner?.isTempCell?.(adjCell.x, adjCell.y, adjCell.z)
+        if (!isTempAdj || (adjTask && adjTask.kind === 'block' && adjTask.status === 'completed')) continue
+        if (mePos && Math.floor(mePos.x) === adjCell.x && Math.floor(mePos.z) === adjCell.z && Math.abs(mePos.y - (adjCell.y + 1)) <= 0.6) continue
+        const ab = this.world.blockAt(adjCell)
+        if (ab && !isAirLike(ab) && !this.fluidBeside(adjCell, true)) {
+          // Keep adjCell only if it is the sole solid neighbor reference for task.world
+          if (!this.hasSolidNeighbor(task.world, adjCell)) continue
+          await this.digBlock(adjCell, { allowScaffold: false }).catch(() => {})
           this.scaffold?.created?.delete(ak)
+          this.planner?.fleet?.coord?.removeTempBlock?.(ak, this.planner?.fleet?.id)
         }
       }
     }
@@ -2194,19 +2211,73 @@ class Placer {
             // Builder bots NEVER immediately break horizontal/below support blocks (`sc.y <= task.world.y`), even inside future `fluidCells`!
             // Those blocks form the continuous catwalk highway for adjacent blocks and upper layers; `executeBlock(t)` clears any cell when `t` is built,
             // `executeFluid` sweeps `tempObstructions` right before pouring fluid, and `Sweeper` cleans up finished layers from behind.
+            const isLookUpTask = Boolean(spec?.look === "up" || task.info?.specs?.[0]?.look === "up")
+            const isDuperOrEndgame = Boolean(task.layer >= 22 || task.order >= 88000 || /^(tnt|piston|sticky_piston|slime_block|observer|note_block)$/.test(task.name || ""))
+            let moreLookUpNearby = false
+            if (isLookUpTask && this.planner?.tasks) {
+              for (let dx = -2; dx <= 2 && !moreLookUpNearby; dx++) {
+                for (let dz = -2; dz <= 2 && !moreLookUpNearby; dz++) {
+                  if (dx === 0 && dz === 0) continue
+                  const nt = this.planner.tasks.get(`${task.world.x + dx},${task.world.y},${task.world.z + dz}`)
+                  if (nt && nt.status !== "completed" && nt.status !== "blocked" && nt.info?.specs?.[0]?.look === "up") {
+                    moreLookUpNearby = true
+                  }
+                }
+              }
+            }
             const supportsToSweep = allSupports.filter(sc => {
+              if (this.planner?.isPendingCell?.(sc)) return false
+              if (isLookUpTask) {
+                return !moreLookUpNearby
+              }
+              if (isDuperOrEndgame && !task.info?.fragile) {
+                return true
+              }
               if (sc.y <= task.world.y) return false
               if (hasSweeper || task.info?.fragile) return false
-              if (this.planner?.isPendingCell?.(sc)) return false
-              for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [2, 0], [-2, 0], [0, 2], [0, -2]]) {
-                const nt = this.planner?.tasks?.get(`${task.world.x + dx},${task.world.y},${task.world.z + dz}`)
-                if (nt && nt.status !== "completed" && nt.info?.specs?.[0]?.look === "up") return false
-              }
+              if (moreLookUpNearby) return false
               return true
             })
+            // If this was the last look-up block (downward piston) in this 3x3 drop tube, also include any temporary look-up ledges in the 3x3 shaft below!
+            if (isLookUpTask && !moreLookUpNearby && this.scaffold?.created) {
+              for (let dy = -4; dy <= 1; dy++) {
+                for (let dx = -2; dx <= 2; dx++) {
+                  for (let dz = -2; dz <= 2; dz++) {
+                    const sc = new Vec3(task.world.x + dx, task.world.y + dy, task.world.z + dz)
+                    const sk = key(sc)
+                    if (this.scaffold.created.has(sk) && !this.planner?.isPendingCell?.(sc) && !supportsToSweep.some(x => x.equals(sc))) {
+                      supportsToSweep.push(sc)
+                    }
+                  }
+                }
+              }
+            }
             if (supportsToSweep.length) {
+              // If the bot is currently standing on one of the temporary ledges in supportsToSweep, step back up onto a permanent rim block first!
+              const meNow = this.bot?.entity?.position
+              if (meNow && supportsToSweep.some(sc => Math.floor(meNow.x) === sc.x && Math.floor(meNow.z) === sc.z && Math.abs(meNow.y - (sc.y + 1)) <= 0.7)) {
+                const standCache = new Map()
+                let rimStand = null
+                for (const dy of [1, 2, 0, -1]) {
+                  for (let dx = -2; dx <= 2 && !rimStand; dx++) {
+                    for (let dz = -2; dz <= 2 && !rimStand; dz++) {
+                      const candS = new Vec3(Math.floor(meNow.x) + dx, Math.floor(meNow.y) + dy, Math.floor(meNow.z) + dz)
+                      if (supportsToSweep.some(sc => sc.x === candS.x && sc.z === candS.z && candS.y === sc.y + 1)) continue
+                      if (this.aim.standOk(candS, standCache) && !this.aim.isHazard(candS)) {
+                        rimStand = new Vec3(candS.x + 0.5, candS.y, candS.z + 0.5)
+                      }
+                    }
+                  }
+                  if (rimStand) break
+                }
+                if (rimStand) {
+                  if (!(await this.hop(rimStand).catch(() => false))) {
+                    await this.nav.goTo(rimStand, 0.5, 4_000, { human: true, work: true, rescue: false }).catch(() => {})
+                  }
+                }
+              }
               const onlySet = new Set(supportsToSweep.map(key))
-              await this.sweepTemporary({ maxBlocks: supportsToSweep.length, final: true, only: onlySet, ignoreReserved: true }).catch(() => {})
+              await this.sweepTemporary({ maxBlocks: supportsToSweep.length, final: true, only: onlySet, ignoreReserved: true, ignoreFluidBeside: isLookUpTask }).catch(() => {})
             }
           }
           if (this.bot.entity) {
@@ -2584,7 +2655,7 @@ class Placer {
           for (const lk of checkRes.leaks) {
             const lt = planner.tasks?.get(lk)
             if (lt && lt.kind === "block") {
-              if (lt._skippedByContinue || (planner.minSkipLayer && lt.layer < planner.minSkipLayer) || lt.layer < task.layer - 2 || planner.quarantined?.has(lk) || (lt.status === "blocked" && (lt.totalAttempts || 0) >= 2)) {
+              if (lt._skippedByContinue || (planner.minSkipLayer && lt.layer < planner.minSkipLayer) || planner.quarantined?.has(lk) || (lt.status === "blocked" && (lt.totalAttempts || 0) >= 2)) {
                 hasQuarantinedLeak = true
                 continue
               }
@@ -2600,13 +2671,13 @@ class Placer {
     throwIfFluidBlocked(fc)
     let approached
     try {
-      approached = await this.approach(task.world, FREE, { allowScaffold: false, minStandDist: lava ? 1.8 : 1.5, bucket: true })
+      approached = await this.approach(task.world, FREE, { allowScaffold: false, minStandDist: lava ? 1.8 : 1.5, bucket: true, hint: task.hint, hintTask: task })
     } catch {
       try {
-        approached = await this.approach(task.world, FREE, { allowScaffold: true, minStandDist: lava ? 1.8 : 1.5, bucket: true })
+        approached = await this.approach(task.world, FREE, { allowScaffold: true, minStandDist: lava ? 1.8 : 1.5, bucket: true, hint: task.hint, hintTask: task })
       } catch (accessErr) {
         if (task.attempts >= 1 && await this.unsealRoofAbove(task)) {
-          approached = await this.approach(task.world, FREE, { allowScaffold: true, minStandDist: lava ? 1.8 : 1.4, bucket: true })
+          approached = await this.approach(task.world, FREE, { allowScaffold: true, minStandDist: lava ? 1.8 : 1.4, bucket: true, hint: task.hint, hintTask: task })
         } else {
           throw accessErr
         }

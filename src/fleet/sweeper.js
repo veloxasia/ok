@@ -1,17 +1,13 @@
 'use strict'
-// Dedicated 5th Bot Janitor / Sweeper Engine.
-// When a fleet has a designated sweeper bot (by default the 5th worker `index === count - 1` when `count >= 5`,
+// Dedicated 5th Bot Janitor / Sweeper Engine with Full Builder-Brain & Raycast Digging.
+// When a fleet has a designated sweeper bot (by default the last worker `index === count - 1` when `count >= 5`,
 // or any worker with `account.role === 'sweeper'` / `config.fleet.sweeperIndex === index`), that bot runs a
 // full-time intelligent real-time cleanup loop:
 //   - Receives real-time temporary block placements (`temp-add` / `temp-rm`) from all builder bots over Fleet IPC,
-//   - Actively scans the live world (`scanWorldForTempBlocks`) around itself and all builder bots for any temporary
-//     scaffold/bridge/pillar blocks (`scaffold.itemName`) inside the build bounding box,
-//   - Actively breaks temporary catwalk, support, and pillar blocks during the build (`!finalSweep`) as soon as
-//     all schematic tasks within 2m of that temporary block are completed (nibbling horizontal catwalks from their
-//     outer tip inward and vertical columns top-down so builders are never stranded),
-//   - Walks onto adjacent catwalk blocks when needed to reach the tip of a multi-block bridge, uses Ender Pearls
-//     (`survival.pearlTo`) for long/upward hops, and falls back to `placer.digBlock` so it breaks blocks with the
-//     same speed and reliability as builder bots!
+//   - Actively scans both around all bots AND across the full schematic bounding box (`scanWorldForTempBlocks`)
+//     so no temporary stone block inside a 3x3 TNT drop tube, duper bay, or lower layer is ever missed,
+//   - Uses the full Builder Brain (`placer.brain.prepare`, `placer.aim` raycast, `nav.goTo` with `rescue: true`,
+//     and raycast blocker clearing) to walk, climb, step, or pearl to any temporary block and dig it immediately!
 
 const { Vec3 } = require('../util/vec3')
 const { sleep } = require('../util/async')
@@ -75,22 +71,44 @@ class SweeperEngine {
     this.failCounts = new Map()
     this.stats = { swept: 0, pearls: 0, scans: 0 }
     this._lastWorldScanAt = 0
+    this._lastFullScanAt = 0
+    this._scanSliceY = null
+  }
+
+  isCriticalObstruction (p) {
+    const k = `${p.x},${p.y},${p.z}`
+    if (this.planner?.fluidCells?.has?.(k)) return true
+    if (p.isLookUpLedge) return true
+    const t = this.planner?.tasks?.get?.(k)
+    if (t && t.status !== 'completed') return true
+    if (this.planner?.tasks) {
+      for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0], [0, 1, 0]]) {
+        const nt = this.planner.tasks.get(`${p.x + dx},${p.y + dy},${p.z + dz}`)
+        if (nt && nt.status !== 'completed' && /^(tnt|piston|sticky_piston|slime_block|redstone_torch|redstone_wall_torch)$/.test(nt.name || '')) {
+          return true
+        }
+      }
+    }
+    return false
   }
 
   targetPriority (p, botPos) {
     const k = `${p.x},${p.y},${p.z}`
-    const obstructsFluid = this.planner?.fluidCells?.has?.(k) ? -200 : 0
+    const obstructsFluid = this.planner?.fluidCells?.has?.(k) ? -260 : 0
+    const isLedge = p.isLookUpLedge ? -240 : 0
     const t = this.planner?.tasks?.get?.(k)
-    const obstructsTask = (t && t.status !== 'completed') ? -150 : 0
+    const obstructsTask = (t && t.status !== 'completed') ? -220 : 0
+    const criticalAdj = this.isCriticalObstruction(p) ? -160 : 0
     let horizTemp = 0
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
       if (this.scaffold.created.has(`${p.x + dx},${p.y},${p.z + dz}`)) horizTemp++
     }
     const dy = botPos ? Math.abs(p.y - botPos.y) : 0
-    const deckPenalty = dy > 3.5 ? 120 + dy * 10 : dy * 6
-    const failPenalty = (this.failCounts.get(k) || 0) * 80
+    const deckPenalty = dy > 4.5 ? 45 + dy * 5 : dy * 4
+    const failPenalty = (this.failCounts.get(k) || 0) * 45
     const dist = botPos ? Math.hypot(p.x + 0.5 - botPos.x, p.z + 0.5 - botPos.z) : 0
-    return obstructsFluid + obstructsTask - p.y * 4 + horizTemp * 12 + dist + deckPenalty + failPenalty
+    const inReachBonus = (botPos && dist <= 4.5 && dy <= 4.0) ? -120 : 0
+    return inReachBonus + obstructsFluid + isLedge + obstructsTask + criticalAdj - p.y * 2 + horizTemp * 8 + dist + deckPenalty + failPenalty
   }
 
   async tickOnce (finalSweep = true) {
@@ -118,7 +136,7 @@ class SweeperEngine {
 
   isEntombedInSolidWalls (p) {
     if (!this.planner?.tasks?.size) return false
-    for (const [dx, dy, dz] of [[0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]]) {
+    for (const [dx, dy, dz] of [[0, 1, 0], [0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]]) {
       const nb = this.world.blockAt({ x: p.x + dx, y: p.y + dy, z: p.z + dz })
       if (!nb || isAirLike(nb) || nb.boundingBox !== 'block') return false
     }
@@ -127,7 +145,7 @@ class SweeperEngine {
 
   scanWorldForTempBlocks (force = false) {
     const now = Date.now()
-    if (!force && now - this._lastWorldScanAt < 6000) return 0
+    if (!force && now - this._lastWorldScanAt < 3500) return 0
     this._lastWorldScanAt = now
     if (!this.planner?.box || !this.world?.blockAt) return 0
     const globalDemand = this.planner.globalMaterialDemand || this.planner.materialDemand
@@ -149,31 +167,48 @@ class SweeperEngine {
     }
     let added = 0
     const seen = new Set()
+    const checkAndAddCell = (x, y, z) => {
+      const k = `${x},${y},${z}`
+      if (seen.has(k) || this.scaffold.created.has(k)) return
+      seen.add(k)
+      const b = this.world.blockAt({ x, y, z })
+      if (!b || !tempNames.has(b.name)) return
+      const t = this.planner.tasks?.get(k)
+      if (t && (t.status === 'completed' || taskMatches(b, t))) return
+      if (this.isEntombedInSolidWalls({ x, y, z })) return
+      const v = new Vec3(x, y, z)
+      v.createdAt = now - 6000
+      v.isCatwalk = true
+      this.scaffold.created.set(k, v)
+      added++
+    }
     for (const c of centers) {
-      for (let dx = -8; dx <= 8; dx++) {
-        for (let dz = -8; dz <= 8; dz++) {
+      for (let dx = -12; dx <= 12; dx++) {
+        for (let dz = -12; dz <= 12; dz++) {
           const x = c.x + dx; const z = c.z + dz
           if (x < bx.x0 - 2 || x > bx.x1 + 2 || z < bx.z0 - 2 || z > bx.z1 + 2) continue
-          for (let dy = -3; dy <= 3; dy++) {
+          for (let dy = -6; dy <= 6; dy++) {
             const y = c.y + dy
             if (y < bx.y0 || y > bx.y1 + 2) continue
-            const k = `${x},${y},${z}`
-            if (seen.has(k) || this.scaffold.created.has(k)) continue
-            seen.add(k)
-            const b = this.world.blockAt({ x, y, z })
-            if (!b || !tempNames.has(b.name)) continue
-            const t = this.planner.tasks?.get(k)
-            if (t && (t.status === 'completed' || taskMatches(b, t))) continue
-            if (this.isEntombedInSolidWalls({ x, y, z })) continue
-            const v = new Vec3(x, y, z)
-            v.createdAt = now - 6000
-            v.isCatwalk = true
-            this.scaffold.created.set(k, v)
-            added++
+            checkAndAddCell(x, y, z)
           }
         }
       }
     }
+    // Also sweep 6 vertical layers of the full schematic bounding box per scan (or all layers when force === true)
+    // so temporary stone blocks inside 3x3 TNT drop tubes or earlier layers are always discovered!
+    const yStart = force
+      ? bx.y0
+      : (this._scanSliceY != null && this._scanSliceY >= bx.y0 && this._scanSliceY <= bx.y1 ? this._scanSliceY : bx.y0)
+    const yEnd = force ? (bx.y1 + 1) : Math.min(bx.y1 + 1, yStart + 5)
+    for (let y = yStart; y <= yEnd; y++) {
+      for (let x = bx.x0 - 1; x <= bx.x1 + 1; x++) {
+        for (let z = bx.z0 - 1; z <= bx.z1 + 1; z++) {
+          checkAndAddCell(x, y, z)
+        }
+      }
+    }
+    this._scanSliceY = yEnd >= bx.y1 + 1 ? bx.y0 : yEnd + 1
     return added
   }
 
@@ -188,11 +223,13 @@ class SweeperEngine {
           if (rec.isAccessStep) v.isAccessStep = true
           if (rec.isCatwalk) v.isCatwalk = true
           if (rec.isTempLadder) v.isTempLadder = true
+          if (rec.isLookUpLedge) v.isLookUpLedge = true
           this.scaffold.created.set(k, v)
         } else {
           if (rec.isAccessStep) existing.isAccessStep = true
           if (rec.isCatwalk) existing.isCatwalk = true
           if (rec.isTempLadder) existing.isTempLadder = true
+          if (rec.isLookUpLedge) existing.isLookUpLedge = true
         }
       }
     }
@@ -210,17 +247,19 @@ class SweeperEngine {
   isSafeToBreak (p, finalSweep = false) {
     const k = `${p.x},${p.y},${p.z}`
     const fails = this.failCounts.get(k) || 0
-    if (fails >= (finalSweep ? 4 : 2)) {
-      if (finalSweep && fails >= 4) {
-        this.scaffold.created.delete(k)
-        this.fleet?.coord?.removeTempBlock?.(k, this.fleet?.id)
-      }
-      return false
-    }
     const failAt = this.unreachable.get(k)
     if (failAt) {
-      const cooldown = finalSweep ? Math.min(20_000, 5_000 * Math.max(1, fails)) : Math.min(60_000, 15_000 * Math.max(1, fails))
+      const cooldown = finalSweep
+        ? Math.min(10_000, 2_500 * Math.max(1, fails))
+        : Math.min(20_000, 3_500 * Math.max(1, fails))
       if (Date.now() - failAt < cooldown) return false
+      // Cooldown expired: decay failCounts so Sweeper never permanently locks out a temporary block!
+      if (fails >= 3) this.failCounts.set(k, 1)
+    }
+    if (finalSweep && fails >= 8) {
+      this.scaffold.created.delete(k)
+      this.fleet?.coord?.removeTempBlock?.(k, this.fleet?.id)
+      return false
     }
     const b = this.world.blockAt(p)
     if (!b || isAirLike(b)) return false
@@ -233,18 +272,18 @@ class SweeperEngine {
       }
       return false
     }
-    if (this.placer?.fluidBeside?.(p, finalSweep)) return false
+    if (this.placer?.fluidBeside?.(p, true)) return false
 
     const me = this.bot.entity?.position
-    if (!finalSweep && me && Math.abs(p.y - me.y) > 5.5) {
+    const isCritical = this.isCriticalObstruction(p)
+    if (!finalSweep && !isCritical && me && Math.abs(p.y - me.y) > 16.0) {
       return false
     }
     if (me && Math.abs(p.x + 0.5 - me.x) < 0.85 && Math.abs(p.z + 0.5 - me.z) < 0.85 && p.y >= Math.floor(me.y - 0.1) - 1 && p.y <= Math.floor(me.y) + 1) {
       return false
     }
 
-    // Break multi-block temporary pillars top-down within Sweeper's reachable vertical band (so if Sweeper is on the ground at y=-60
-    // next to an 8-block pillar y=-60..-53, it immediately breaks y=-56 -> -57 -> -58 -> -59 -> -60 instead of skipping the whole pillar!)
+    // Break multi-block temporary pillars top-down within Sweeper's reachable vertical band
     const aboveIsReachableFromDeck = !me || (p.y + 1) <= Math.floor(me.y + 0.1) + 4
     const hasTempAbove = aboveIsReachableFromDeck && this.scaffold.created.has(`${p.x},${p.y + 1},${p.z}`) && !isAirLike(this.world.blockAt({ x: p.x, y: p.y + 1, z: p.z }))
     if (hasTempAbove) return false
@@ -255,14 +294,14 @@ class SweeperEngine {
         const wp = this.fleet.coord.position(w)
         if (wp) {
           const hDist = Math.hypot(p.x + 0.5 - wp.x, p.z + 0.5 - wp.z)
-          const safeR = p.y <= Math.floor(wp.y) - 1 ? 2.6 : ((p.isCatwalk || p.isAccessStep) ? 3.8 : 2.8)
+          const safeR = p.y <= Math.floor(wp.y) - 1 ? 2.4 : ((p.isCatwalk || p.isAccessStep) ? 3.2 : 2.5)
           if (hDist < safeR && p.y >= Math.floor(wp.y) - 2 && p.y <= Math.floor(wp.y) + 2) return false
-          if (hDist < 2.2 && wp.y >= p.y) return false
+          if (hDist < 2.0 && wp.y >= p.y) return false
         }
         if (w.target) {
           const tDist = Math.hypot(p.x - w.target.x, p.z - w.target.z)
-          const safeTR = (p.isCatwalk || p.isAccessStep) ? 4.5 : 3.0
-          if (tDist <= safeTR && Math.abs(p.y - w.target.y) <= 2) return false
+          const safeTR = (p.isCatwalk || p.isAccessStep) ? 3.5 : 2.5
+          if (tDist <= safeTR && Math.abs(p.y - w.target.y) <= 2 && !(w.target.x === p.x && w.target.y === p.y && w.target.z === p.z)) return false
         }
       }
     }
@@ -272,11 +311,11 @@ class SweeperEngine {
         if (!ent || ent === this.bot.entity || ent.type !== 'player' || !ent.position) continue
         const ep = ent.position
         const ehDist = Math.hypot(p.x + 0.5 - ep.x, p.z + 0.5 - ep.z)
-        if (ehDist < 3.4 && p.y >= Math.floor(ep.y) - 3 && p.y <= Math.floor(ep.y) + 2) return false
-        if (ehDist < 2.2 && ep.y >= p.y) return false
+        if (ehDist < 2.8 && p.y >= Math.floor(ep.y) - 2 && p.y <= Math.floor(ep.y) + 2) return false
+        if (ehDist < 1.9 && ep.y >= p.y) return false
       }
     }
-    const isTaskCellHere = Boolean(t && t.status !== "completed")
+    const isTaskCellHere = Boolean(t && t.status !== 'completed')
     const isFluidCellHere = Boolean(this.planner?.fluidCells?.has?.(k))
 
     if (!finalSweep) {
@@ -285,35 +324,29 @@ class SweeperEngine {
       const currentLayer = stats?.currentLayer
       const currentOrder = stats?.currentOrder
       const baseLayerY = (this.planner?.box?.y0 ?? -60) + (currentLayer ?? 0)
+      const isFinishedLowerLayer = Boolean(currentLayer != null && p.y <= baseLayerY - 2)
       const isCurrentLayerTaskHere = Boolean(isTaskCellHere && (currentLayer == null || t.layer < currentLayer || (t.layer === currentLayer && (currentOrder == null || t.order <= currentOrder))))
-      // Only treat a fluidCell as an active fluid obstruction once the build has advanced at least 2 layers above `p.y` (or reached endgame fluids >= 88000),
-      // so Sweeper NEVER rips out catwalk highways under builders on the active layer or the deck immediately below it!
-      const isActiveFluidObstruction = Boolean(isFluidCellHere && currentOrder >= 88000)
-      const minAge = (isCurrentLayerTaskHere || isActiveFluidObstruction) ? 2000 : 3200
+      const isActiveFluidObstruction = Boolean(isFluidCellHere && (currentOrder >= 88000 || isFinishedLowerLayer))
+      const minAge = (isCurrentLayerTaskHere || isActiveFluidObstruction || isCritical) ? 1500 : 2800
       if (age < minAge) return false
 
-      // If `p` is serving as an overhead reference cap above an unfinished `look === "up"` block (such as downward pistons on L23),
-      // keep `p` until the `look === "up"` blocks within 1 block below `p` are completed!
+      // If `p` is directly above an unfinished `look === "up"` block (serving as its overhead reference cap), keep `p` until that block is placed
       if (!isCurrentLayerTaskHere && !isActiveFluidObstruction && this.planner?.tasks) {
         for (let dx = -1; dx <= 1; dx++) {
           for (let dz = -1; dz <= 1; dz++) {
             const belowTask = this.planner.tasks.get(`${p.x + dx},${p.y - 1},${p.z + dz}`)
-            if (belowTask && belowTask.kind === "block" && belowTask.status !== "completed" && belowTask.status !== "blocked" && belowTask.info?.specs?.[0]?.look === "up") {
+            if (belowTask && belowTask.kind === 'block' && belowTask.status !== 'completed' && belowTask.status !== 'blocked' && belowTask.info?.specs?.[0]?.look === 'up') {
               return false
             }
           }
         }
       }
 
-      // Preserve temporary ladders until finalSweep; preserve 1-block staircase steps (`isAccessStep && !isCatwalk`) while < 18s old unless all schematic tasks within 3m are completed!
-      if (p.isTempLadder && !isCurrentLayerTaskHere && !isActiveFluidObstruction) {
-        return false
-      }
-      if (p.isAccessStep && !p.isCatwalk && !isCurrentLayerTaskHere && !isActiveFluidObstruction) {
+      if (p.isTempLadder && !isCurrentLayerTaskHere && !isActiveFluidObstruction && !isFinishedLowerLayer) {
         return false
       }
 
-      if (!isCurrentLayerTaskHere && !isActiveFluidObstruction) {
+      if (!isCurrentLayerTaskHere && !isActiveFluidObstruction && !isCritical) {
         let horizTemp = 0
         for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
           const nk = `${p.x + dx},${p.y},${p.z + dz}`
@@ -322,19 +355,14 @@ class SweeperEngine {
           }
         }
         const isTowerStack = this.scaffold.created.has(`${p.x},${p.y - 1},${p.z}`) || this.scaffold.created.has(`${p.x},${p.y + 1},${p.z}`)
-        // For pure 1-layer horizontal catwalk bridges (`!isTowerStack`), always break from the outer tip inward (`horizTemp <= 1`);
-        // for vertical pillar clusters (`isTowerStack`), allow breaking top-most blocks (`!hasTempAbove`) even in 2x2 or L-shaped pillar clusters!
-        if (!isTowerStack && horizTemp >= 2) return false
+        if (!isTowerStack && !isFinishedLowerLayer && age < 12_000 && horizTemp >= 2) return false
 
-        const isTowerCol = isTowerStack
-        // Single support blocks and horizontal catwalk highways (`!isTowerCol`) are preserved while any schematic block task within 3m horizontally
-        // on the same layer or 1..2 layers above is still unfinished!
-        if (!isTowerCol && this.planner?.tasks) {
-          for (let dx = -2; dx <= 2; dx++) {
-            for (let dz = -2; dz <= 2; dz++) {
-              for (let dy = -1; dy <= 1; dy++) {
+        if (!isTowerStack && !isFinishedLowerLayer && age < 20_000 && this.planner?.tasks) {
+          for (let dx = -1; dx <= 1; dx++) {
+            for (let dz = -1; dz <= 1; dz++) {
+              for (let dy = 0; dy <= 1; dy++) {
                 const nt = this.planner.tasks.get(`${p.x + dx},${p.y + dy},${p.z + dz}`)
-                if (nt && nt.kind === "block" && nt.status !== "completed" && nt.status !== "blocked") {
+                if (nt && nt.kind === 'block' && nt.status !== 'completed' && nt.status !== 'blocked' && (nt.attempts || 0) < 2) {
                   return false
                 }
               }
@@ -353,11 +381,68 @@ class SweeperEngine {
     for (const w of this.fleet.coord.workers.values()) {
       if (w.id === this.fleet.id) continue
       const wp = this.fleet.coord.position(w)
-      if (wp && Math.hypot(wp.x - me.x, wp.z - me.z) < 2.8 && Math.abs(wp.y - me.y) <= 2.2) {
+      if (wp && Math.hypot(wp.x - me.x, wp.z - me.z) < 2.6 && Math.abs(wp.y - me.y) <= 2.2) {
         await this.placer.retreatFrom(new Vec3(Math.floor(wp.x), Math.floor(wp.y), Math.floor(wp.z)), 4).catch(() => {})
         return
       }
     }
+  }
+
+  async tryDirectRaycastDig (p, finalSweep = false) {
+    const k = `${p.x},${p.y},${p.z}`
+    const poseNow = this.placer.aim.fromPose(p, FREE, null, { mode: 'self' })
+    if (poseNow) {
+      try {
+        const aimed = await this.placer.aimAndValidate(p, FREE, poseNow, { mode: 'self' })
+        const bNow = this.world.blockAt(p)
+        if (bNow && !isAirLike(bNow) && this.isSafeToBreak(p, finalSweep)) {
+          await this.builder.interaction.digAimed(bNow, FACE_INDEX[aimed.pose.faceName])
+        }
+        if (isAirLike(this.world.blockAt(p))) {
+          this.scaffold.created.delete(k)
+          this.fleet?.coord?.removeTempBlock?.(k, this.fleet?.id)
+          this.unreachable.delete(k)
+          this.failCounts.delete(k)
+          this.stats.swept++
+          this.logger.info(`SWEEPER: cleared temporary block at ${k} (raycast)`)
+          return true
+        }
+      } catch {}
+    }
+    // If another temporary block is directly in the raycast line-of-sight within reach, break that blocker first!
+    const e = this.bot.entity?.position
+    if (e && this.placer.aim.rayOutlineBlocker) {
+      const eye = e.offset(0, 1.62, 0)
+      const center = new Vec3(p.x + 0.5, p.y + 0.5, p.z + 0.5)
+      const dist = eye.distanceTo(center)
+      if (dist <= 4.6) {
+        const dir = center.minus(eye).scaled(1 / Math.max(0.001, dist))
+        const blk = this.placer.aim.rayOutlineBlocker(eye, dir, dist, p)
+        if (blk?.pos) {
+          const bk = `${blk.pos.x},${blk.pos.y},${blk.pos.z}`
+          if (this.scaffold.created.has(bk) && this.isSafeToBreak(blk.pos, finalSweep)) {
+            const bPose = this.placer.aim.fromPose(blk.pos, FREE, null, { mode: 'self' })
+            if (bPose) {
+              try {
+                const bAimed = await this.placer.aimAndValidate(blk.pos, FREE, bPose, { mode: 'self' })
+                const bBlock = this.world.blockAt(blk.pos)
+                if (bBlock && !isAirLike(bBlock)) {
+                  await this.builder.interaction.digAimed(bBlock, FACE_INDEX[bAimed.pose.faceName])
+                  if (isAirLike(this.world.blockAt(blk.pos))) {
+                    this.scaffold.created.delete(bk)
+                    this.fleet?.coord?.removeTempBlock?.(bk, this.fleet?.id)
+                    this.stats.swept++
+                    this.logger.info(`SWEEPER: cleared raycast-blocking temporary block at ${bk}`)
+                    return true
+                  }
+                }
+              } catch {}
+            }
+          }
+        }
+      }
+    }
+    return false
   }
 
   async breakTempBlock (p, finalSweep = false) {
@@ -366,87 +451,76 @@ class SweeperEngine {
     const e = this.bot.entity?.position
     if (!e) return false
 
-    const poseNow = this.placer.aim.fromPose(p, FREE, null, { mode: 'self' })
-    if (poseNow && this.placer.standingStill()) {
-      try {
-        const aimed = await this.placer.aimAndValidate(p, FREE, poseNow, { mode: 'self' })
-        const bNow = this.world.blockAt(p)
-        if (bNow && !isAirLike(bNow) && this.isSafeToBreak(p, finalSweep)) {
-          await this.builder.interaction.digAimed(bNow, FACE_INDEX[aimed.pose.faceName])
-        }
-        this.scaffold.created.delete(k)
-        this.fleet?.coord?.removeTempBlock?.(k, this.fleet?.id)
-        this.unreachable.delete(k)
-        this.failCounts.delete(k)
-        this.stats.swept++
-        this.logger.info(`SWEEPER: cleared temporary block at ${k} (direct reach)`)
-        return true
-      } catch {}
-    }
+    // 1. Direct raycast from current position
+    if (await this.tryDirectRaycastDig(p, finalSweep)) return true
 
-    // Allow standing on permanent blocks first (`nonTempCs`), and fall back to standing on adjacent temporary catwalk blocks (`tempCatwalkCs`)
-    // when breaking the outer tip of a multi-block catwalk — never standing on `p` itself!
+    // 2. Find all aim stands (including edge shifts and up/down up to 6 blocks)
     const allCs = this.placer.aim.candidates(p, FREE, {
       mode: 'self',
       allowScaffold: false,
       allowEdgeShift: true,
       max: 24,
-      stages: [{ r: 5, down: 5, up: 5, aroundTarget: true }]
-    }).filter(c => !(c.cell.x === p.x && c.cell.z === p.z && c.cell.y >= p.y && c.cell.y <= p.y + 2) && !this.placer.isDeadStand?.(c.stand) && (finalSweep || Math.abs(e.y - c.stand.y) <= 3.5))
+      stages: [{ r: 5, down: 6, up: 6, aroundTarget: true }]
+    }).filter(c => !(c.cell.x === p.x && c.cell.z === p.z && c.cell.y >= p.y && c.cell.y <= p.y + 2) && !this.placer.isDeadStand?.(c.stand))
 
     const nonTempCs = allCs.filter(c => !this.scaffold.contains(c.cell) && !this.scaffold.contains({ x: c.cell.x, y: c.cell.y - 1, z: c.cell.z }))
     const rawCs = nonTempCs.length ? [...nonTempCs, ...allCs.filter(c => !nonTempCs.includes(c))] : allCs
 
     if (!rawCs.length) {
+      // Fallback to builder's digBlock with allowScaffold: true when floating or out of ground reach
+      try {
+        await this.placer.digBlock(p, { allowScaffold: true })
+        if (isAirLike(this.world.blockAt(p))) {
+          this.scaffold.created.delete(k)
+          this.fleet?.coord?.removeTempBlock?.(k, this.fleet?.id)
+          this.unreachable.delete(k)
+          this.failCounts.delete(k)
+          this.stats.swept++
+          this.logger.info(`SWEEPER: cleared temporary block at ${k} (builder scaffold reach)`)
+          return true
+        }
+      } catch {}
       this.unreachable.set(k, Date.now())
       this.failCounts.set(k, (this.failCounts.get(k) || 0) + 1)
       return false
     }
 
-    const isSameDeckReachable = c => {
-      if (!this.placer?.brain) return true
-      const v = this.placer.reachVerdict(c.stand)
-      if (v === 'yes') return true
-      if (v === 'no') return false
-      return Math.abs(c.stand.y - e.y) <= 2.2
-    }
     const yesNonTemp = nonTempCs.filter(c => !this.placer?.brain || this.placer.reachVerdict(c.stand) === 'yes')
     const yesRaw = rawCs.filter(c => !this.placer?.brain || this.placer.reachVerdict(c.stand) === 'yes')
-    const reachableNonTemp = yesNonTemp.length ? yesNonTemp : nonTempCs.filter(isSameDeckReachable)
-    const reachableCs = reachableNonTemp.length
-      ? reachableNonTemp
-      : (yesRaw.length ? yesRaw : rawCs.filter(isSameDeckReachable))
-    const cand = reachableCs[0] || rawCs[0]
+    const cand = yesNonTemp[0] || yesRaw[0] || nonTempCs[0] || rawCs[0]
     const dist = Math.hypot(cand.stand.x - e.x, cand.stand.z - e.z)
     const dy = cand.stand.y - e.y
 
-    let pearled = false
-    const allowPearlHere = (dist > 14 || (dy >= 3.0 && dy <= 7.0)) &&
-      (finalSweep || (dy >= 0 && dy <= 6.0)) &&
-      Date.now() - (this._lastPearlAt || 0) > 60_000 &&
-      this.survival && Number(this.bot.health) >= 16 && this.config.navigation?.pearls !== false
+    let connected = Boolean(yesNonTemp.length || yesRaw.length)
+    const allowPearlHere = (dist > 12 || Math.abs(dy) >= 3.0) &&
+      Date.now() - (this._lastPearlAt || 0) > 25_000 &&
+      this.survival && Number(this.bot.health) >= 14 && this.config.navigation?.pearls !== false
     if (allowPearlHere) {
       this._lastPearlAt = Date.now()
       const pearlTarget = new Vec3(cand.cell.x + 0.5, cand.cell.y, cand.cell.z + 0.5)
       if (isFullTop(this.world.blockAt(cand.cell.offset(0, -1, 0))) && isBodyFree(this.world.blockAt(cand.cell)) && isBodyFree(this.world.blockAt(cand.cell.offset(0, 1, 0)))) {
-        pearled = await this.survival.pearlTo(pearlTarget).catch(() => false)
+        const pearled = await this.survival.pearlTo(pearlTarget).catch(() => false)
         if (pearled) {
+          connected = true
           this.stats.pearls++
           this.logger.info(`SWEEPER: ender-pearled to ${cand.cell.x},${cand.cell.y},${cand.cell.z} to clear temporary block ${k}`)
         }
       }
     }
 
-    if (!reachableCs.length && !pearled) {
-      this.unreachable.set(k, Date.now())
-      this.failCounts.set(k, (this.failCounts.get(k) || 0) + 1)
-      return false
+    // Use full Builder Brain (`placer.brain.prepare`) when `cand.stand` is on another deck/layer!
+    if (!connected && this.placer?.brain) {
+      const prep = await this.placer.brain.prepare(cand.stand, { force: true }).catch(() => 'no')
+      this.placer.invalidateWorldCaches?.()
+      if (prep !== 'no' || this.placer.reachVerdict(cand.stand) !== 'no') {
+        connected = true
+      }
     }
 
-    // NEVER pass `rescue: Boolean(finalSweep)` on the Sweeper Bot so Sweeper never builds new temporary stone pillars just to reach a temporary block!
     try {
-      if (!(await this.placer.hop?.(cand.stand).catch(() => false))) {
-        await this.nav.goTo(cand.stand, 0.4, 5000, { human: true, work: true, rescue: false })
+      const walkStand = this.placer.walkStandOf ? this.placer.walkStandOf(cand) : cand.stand
+      if (!(await this.placer.hop?.(walkStand).catch(() => false))) {
+        await this.nav.goTo(walkStand, 0.45, 7000, { human: true, work: true, rescue: Boolean(finalSweep || this.isCriticalObstruction(p)) })
       }
       if (!this.isSafeToBreak(p, finalSweep)) {
         this.placer?.setPhase?.('sweeper: watching for temporary blocks')
@@ -455,19 +529,11 @@ class SweeperEngine {
       if (cand.edge && !this.placer.aim.fromPose(p, FREE, null, { mode: 'self' })) {
         await this.scaffold?.slide?.(cand.stand, true).catch(() => false)
       }
-      let swept = await this.placer.sweepTemporary({ maxBlocks: 3, final: true, only: new Set([k]), ignoreReserved: true })
-      if (swept === 0 && this.scaffold.created.has(k) && this.isSafeToBreak(p, finalSweep)) {
-        const poseAfter = this.placer.aim.fromPose(p, FREE, null, { mode: 'self' })
-        if (poseAfter) {
-          const aimed = await this.placer.aimAndValidate(p, FREE, poseAfter, { mode: 'self' })
-          const bNow = this.world.blockAt(p)
-          if (bNow && !isAirLike(bNow)) {
-            await this.builder.interaction.digAimed(bNow, FACE_INDEX[aimed.pose.faceName])
-            this.scaffold.created.delete(k)
-            swept = 1
-          }
-        }
+      if (await this.tryDirectRaycastDig(p, finalSweep)) {
+        this.placer?.setPhase?.('sweeper: watching for temporary blocks')
+        return true
       }
+      const swept = await this.placer.sweepTemporary({ maxBlocks: 3, final: true, only: new Set([k]), ignoreReserved: true, ignoreFluidBeside: true })
       if (swept > 0 || !this.scaffold.created.has(k) || isAirLike(this.world.blockAt(p))) {
         this.scaffold.created.delete(k)
         this.fleet?.coord?.removeTempBlock?.(k, this.fleet?.id)
@@ -492,7 +558,7 @@ class SweeperEngine {
   }
 
   async runLoop () {
-    this.logger.info('SWEEPER: dedicated 5th bot janitor/sweeper active (breaking temporary bridges/pillars in real time so builders never stop)')
+    this.logger.info('SWEEPER: dedicated janitor/sweeper active with full builder-brain & raycast digging')
     while (this.builder.running && !this.builder.stopRequested) {
       this.fleet?.coord?.beat(this.fleet.id)
       if (this.builder.paused) { await sleep(100); continue }
@@ -521,7 +587,7 @@ class SweeperEngine {
         this.fleet?.coord?.claim(this.fleet.id, { key: `sweep:${target.x},${target.y},${target.z}`, world: target })
         const broke = await this.breakTempBlock(target, finalSweep)
         this.fleet?.coord?.release(this.fleet.id)
-        await sleep(broke ? 40 : 250)
+        await sleep(broke ? 25 : 120)
         continue
       }
 
@@ -529,31 +595,33 @@ class SweeperEngine {
         await this.placer.cleanupAll().catch(() => {})
         this.fleet?.coord?.setDone(this.fleet.id, true)
         if (await this.builder.fleetFinish()) break
-        await sleep(250)
+        await sleep(200)
         continue
       }
 
-      if (this.fleet?.coord?.workers && Date.now() - (this._lastDeckFollowAt || 0) > 8_000) {
+      if (this.fleet?.coord?.workers && Date.now() - (this._lastDeckFollowAt || 0) > 6_000) {
         let bestWp = null
         let bestDist = Infinity
         for (const w of this.fleet.coord.workers.values()) {
           if (w.id === this.fleet.id) continue
           const wp = this.fleet.coord.position(w)
-          if (wp && wp.y - e.y >= 5.0) {
+          if (wp && Math.abs(wp.y - e.y) >= 4.0) {
             const d = Math.hypot(wp.x - e.x, wp.z - e.z)
             if (d < bestDist) { bestDist = d; bestWp = wp }
           }
         }
         if (bestWp) {
           this._lastDeckFollowAt = Date.now()
-          this.placer.setPhase('sweeper: climbing to active deck')
-          await this.nav.goTo(new Vec3(Math.floor(bestWp.x) + 0.5, Math.floor(bestWp.y), Math.floor(bestWp.z) + 0.5), 3.5, 10_000, { human: true, work: true, rescue: true }).catch(() => {})
+          this.placer.setPhase('sweeper: moving to active builder deck')
+          const goalStand = new Vec3(Math.floor(bestWp.x) + 0.5, Math.floor(bestWp.y), Math.floor(bestWp.z) + 0.5)
+          await this.placer.brain?.prepare?.(goalStand, { force: true }).catch(() => {})
+          await this.nav.goTo(goalStand, 3.5, 9_000, { human: true, work: true, rescue: true }).catch(() => {})
           continue
         }
       }
       await this.stepAsideIfCrowded()
       this.placer.setPhase('sweeper: watching for temporary blocks')
-      await sleep(250)
+      await sleep(180)
     }
   }
 }

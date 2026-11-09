@@ -970,7 +970,16 @@ class ConstructionEngine {
           if (this.scaffold?.onScaffold?.() && this.scaffold.heightUnderFeet() >= 1) {
             await this.scaffold.descend().catch(() => {})
           }
-          await this.escapeIfWalledIn(`${error.code || 'ERR'} x${this.failStreak}`)
+          // Only trigger escapeIfWalledIn on NO_ACCESS if the bot is genuinely in a cramped pocket (<16 reachable cells) or failStreak >= 5
+          let shouldCheckEscape = error.code !== 'NO_ACCESS' || this.failStreak >= 5
+          if (!shouldCheckEscape && this.brain && this.bot?.entity?.position) {
+            const p = this.bot.entity.position.floored()
+            const fw = this.brain.getForwardReach?.(p, 1, (x, y, z) => this.brain.isBlockedCell(x, y, z))
+            if (!fw?.cells || fw.cells.size < 16) shouldCheckEscape = true
+          }
+          if (shouldCheckEscape) {
+            await this.escapeIfWalledIn(`${error.code || 'ERR'} x${this.failStreak}`)
+          }
         }
         if (error.code === 'PROTECTED' || error.code === 'UNSUPPORTED') this.planner.markFailure(task, error, { permanent: true })
         else this.planner.markFailure(task, error)

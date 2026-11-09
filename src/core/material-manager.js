@@ -66,10 +66,10 @@ class MaterialManager {
     const have = this.countItem(itemName)
     const need = Math.max(minimum - have, 1)
     if (stack === 1) {
-      if (itemName === 'water_bucket') {
+      if (itemName === 'water_bucket' || itemName === 'lava_bucket') {
         const demand = this.requirements.get(itemName) || need
         const free = Number(this.bot.inventory?.emptySlotCount?.() ?? 20)
-        return Math.min(Math.max(need, Math.min(demand, 6)), Math.max(1, Math.min(8, free - 4)))
+        return Math.min(Math.max(need, Math.min(demand, 10)), Math.max(1, Math.min(12, free - 3)))
       }
       return Math.min(Math.max(need, 1), 4)
     }
@@ -218,6 +218,9 @@ class MaterialManager {
 
   async ensureItem (itemName, minimum = 1) {
     this.closeOpenContainer()
+    if ((itemName === 'lava_bucket' || itemName === 'water_bucket') && this.countItem(itemName) < minimum) {
+      await this.clearEmptyBuckets().catch(() => {})
+    }
     if (this.config.materials?.autoGive && Number(this.bot.inventory?.emptySlotCount?.() ?? 99) <= 1 && this.countItem(itemName) < minimum) {
       await this.makeRoom(6)
     }
@@ -301,13 +304,18 @@ class MaterialManager {
   async clearEmptyBuckets () {
     this.closeOpenContainer()
     const emptyBuckets = (this.bot.inventory?.items?.() || []).filter(i => i?.name === 'bucket')
-    if (emptyBuckets.length >= 4) {
+    const totalEmpty = emptyBuckets.reduce((s, b) => s + (b.count || 1), 0)
+    if (totalEmpty >= 3) {
+      let kept = false
       for (const b of emptyBuckets) {
-        try { await this.bot.toss(b.type, b.metadata ?? null, b.count); await sleep(60) } catch {}
+        if (!kept && b.count === 1) { kept = true; continue }
+        const dropCount = !kept ? Math.max(1, b.count - 1) : b.count
+        kept = true
+        try { await this.bot.toss(b.type, b.metadata ?? null, dropCount); await sleep(40) } catch {}
       }
     }
-    if (this.config.materials?.autoGive && Number(this.bot.inventory?.emptySlotCount?.() ?? 99) <= 2) {
-      await this.makeRoom(6).catch(() => {})
+    if (Number(this.bot.inventory?.emptySlotCount?.() ?? 99) <= 3) {
+      await this.makeRoom(8).catch(() => {})
     }
   }
   serverSlotState () { return null }

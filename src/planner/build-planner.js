@@ -634,7 +634,7 @@ class BuildPlanner {
           const layer = worldPos.y - originY
           const key = keyOf(worldPos)
           const kind = info.kind === 'fluid' ? 'fluid' : 'block'
-          if (kind === 'fluid' && y < end.y) {
+          if (kind === 'fluid' && name !== 'lava' && y < end.y) {
             const aboveBlock = schematic.getBlock(new Vec3(x, y + 1, z))
             const aboveName = aboveBlock?.name ? aboveBlock.name.replace(/^minecraft:/, '') : null
             if (aboveName === name) {
@@ -1098,7 +1098,7 @@ class BuildPlanner {
         for (const t of this.tasks.values()) {
           if (t.order >= 88000 || t.isolatedColumn || t.layer < l0 || t.layer > l1) continue
           if (t.kind === "fluid") {
-            if (t.layer < l1) { bandValid = false }
+            if (t.layer < l1 && t.name !== "lava") { bandValid = false }
             continue
           }
           if (t.kind === "waterlog") {
@@ -1149,7 +1149,7 @@ class BuildPlanner {
         if ((!floorsOk || multiLayerCols.length < 4) && bandH === 4) {
           const fullCols = []
           for (const [ck, list] of cols.entries()) {
-            if (list.length !== 4 || !list.every((t, i) => t.layer === l0 + i)) continue
+            if ((list.length !== 4 && list.length !== 3) || !list.every((t, i) => t.layer === l0 + i)) continue
             const x = list[0].world.x; const z = list[0].world.z
             if (!hasSolidFloorAt(x, list[0].world.y - 1, z)) continue
             fullCols.push({ ck, x, z, list, hasFloor: true, partners: [] })
@@ -1274,25 +1274,102 @@ class BuildPlanner {
         }
         if (coveredSet.size < multiLayerCols.length) continue
 
-        // Assign each non-anchor multiLayerCol to an adjacent anchor column, balancing partner counts in O(1) via anchorMap
+        // Compute non-glass connected components (each of the 64 modules has 20 cobblestone + 6 oak_leaves in a disjoint 8-neighbor ring)
+        const compByCk = new Map()
+        const lavaXZByComp = new Map()
+        if (isStackedGeneratorBand) {
+          let nextCompId = 0
+          for (const col of multiLayerCols) {
+            if (compByCk.has(col.ck) || /glass/.test(col.list[0]?.name || "")) continue
+            const compId = nextCompId++
+            const q = [col]
+            compByCk.set(col.ck, compId)
+            while (q.length) {
+              const cur = q.shift()
+              for (let dx = -1; dx <= 1; dx++) {
+                for (let dz = -1; dz <= 1; dz++) {
+                  if (dx === 0 && dz === 0) continue
+                  const nk = `${cur.x + dx},${cur.z + dz}`
+                  const ncol = multiColMap.get(nk)
+                  if (ncol && !compByCk.has(nk) && !/glass/.test(ncol.list[0]?.name || "")) {
+                    compByCk.set(nk, compId)
+                    q.push(ncol)
+                  }
+                }
+              }
+            }
+          }
+          // Each module's 6 lava columns have >=2 horizontal neighbors in that module's non-glass component;
+          // and each module's 4 black_stained_glass columns are the glass columns horizontally adjacent to those 6 lava columns!
+          const seenLavaXZ = new Set()
+          for (const t of this.tasks.values()) {
+            if (t.layer !== l0 || t.kind !== "fluid" || t.name !== "lava") continue
+            const xz = `${t.world.x},${t.world.z}`
+            if (seenLavaXZ.has(xz)) continue
+            seenLavaXZ.add(xz)
+            let ownerComp = null
+            for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+              const nk = `${t.world.x + dx},${t.world.z + dz}`
+              const ncol = multiColMap.get(nk)
+              if (ncol && !/glass/.test(ncol.list[0]?.name || "") && compByCk.has(nk)) {
+                ownerComp = compByCk.get(nk)
+                break
+              }
+            }
+            if (ownerComp !== null) {
+              if (!lavaXZByComp.has(ownerComp)) lavaXZByComp.set(ownerComp, [])
+              lavaXZByComp.get(ownerComp).push({ x: t.world.x, z: t.world.z, xz })
+              for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                const gk = `${t.world.x + dx},${t.world.z + dz}`
+                const gcol = multiColMap.get(gk)
+                if (gcol && /glass/.test(gcol.list[0]?.name || "")) {
+                  compByCk.set(gk, ownerComp)
+                }
+              }
+            }
+          }
+          for (const col of multiLayerCols) {
+            if (compByCk.has(col.ck)) continue
+            for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+              const cid = compByCk.get(`${col.x + dx},${col.z + dz}`)
+              if (cid !== undefined) { compByCk.set(col.ck, cid); break }
+            }
+          }
+        }
+
+        // Assign each non-anchor multiLayerCol to an adjacent anchor column in the SAME module ring
         const anchorMap = new Map(selectedAnchors.map(a => [a.ck, a]))
         const partnerCols = multiLayerCols.filter(c => !selectedSet.has(c.ck))
         for (const p of partnerCols) {
+          const pComp = compByCk.get(p.ck)
           const adj = []
           for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
             const a = anchorMap.get(`${p.x + dx},${p.z + dz}`)
-            if (a) adj.push(a)
+            if (a && (!isStackedGeneratorBand || compByCk.get(a.ck) === pComp)) adj.push(a)
           }
           if (!adj.length && isStackedGeneratorBand) {
             for (let dx = -2; dx <= 2; dx++) {
               for (let dz = -2; dz <= 2; dz++) {
                 if (dx * dx + dz * dz > 5) continue
                 const a = anchorMap.get(`${p.x + dx},${p.z + dz}`)
+                if (a && compByCk.get(a.ck) === pComp) adj.push(a)
+              }
+            }
+          }
+          if (!adj.length && isStackedGeneratorBand) {
+            for (const a of selectedAnchors) {
+              if (compByCk.get(a.ck) === pComp) adj.push(a)
+            }
+          }
+          if (!adj.length) {
+            for (let dx = -2; dx <= 2; dx++) {
+              for (let dz = -2; dz <= 2; dz++) {
+                const a = anchorMap.get(`${p.x + dx},${p.z + dz}`)
                 if (a) adj.push(a)
               }
             }
           }
-          adj.sort((a, b) => a.partners.length - b.partners.length)
+          adj.sort((a, b) => (a.partners.length - b.partners.length) || (Math.hypot(a.x - p.x, a.z - p.z) - Math.hypot(b.x - p.x, b.z - p.z)))
           adj[0].partners.push(p)
         }
 
@@ -1353,11 +1430,39 @@ class BuildPlanner {
         const allClusterTasks = []
         const clusterLists = []
         let globalClusterSeq = 0
-        // For stacked generator bands, group adjacent anchors in the same module into 2-anchor Boustrophedon (Snake) pairs
-        // so bots build a wide 8-10 column platform at level i, then reverse direction at level i + 1 (0m walk to climb up, <=1 block vertical step between anchors)!
         const anchorGroups = []
-        for (const a of orderedAnchors) anchorGroups.push([a])
+        if (isStackedGeneratorBand) {
+          const anchorsByComp = new Map()
+          for (const a of orderedAnchors) {
+            const cid = compByCk.get(a.ck) ?? -1
+            if (!anchorsByComp.has(cid)) anchorsByComp.set(cid, [])
+            anchorsByComp.get(cid).push(a)
+          }
+          const seenComps = new Set()
+          for (const a of orderedAnchors) {
+            const cid = compByCk.get(a.ck) ?? -1
+            if (seenComps.has(cid)) continue
+            seenComps.add(cid)
+            const compAnchors = (anchorsByComp.get(cid) || [a]).slice()
+            const orderedInComp = []
+            let curCA = compAnchors.shift()
+            orderedInComp.push(curCA)
+            while (compAnchors.length) {
+              let bi = 0; let bd = Infinity
+              for (let i = 0; i < compAnchors.length; i++) {
+                const d = Math.hypot(compAnchors[i].x - curCA.x, compAnchors[i].z - curCA.z)
+                if (d < bd) { bd = d; bi = i }
+              }
+              curCA = compAnchors.splice(bi, 1)[0]
+              orderedInComp.push(curCA)
+            }
+            anchorGroups.push(orderedInComp)
+          }
+        } else {
+          for (const a of orderedAnchors) anchorGroups.push([a])
+        }
 
+        const claimedBandFluids = new Set()
         for (let cid = 0; cid < anchorGroups.length; cid++) {
           const grpAnchors = anchorGroups[cid]
           for (const a of grpAnchors) {
@@ -1370,10 +1475,18 @@ class BuildPlanner {
           const p0Hint = p0HasFloor ? { x: a.partners[0].x, y: baseY, z: a.partners[0].z } : null
 
           if (isStackedGeneratorBand) {
-            for (let i = 0; i < a.list.length; i++) {
+            const grpCompId = compByCk.get(a.ck)
+            const grpColMap = new Map()
+            for (const ga of grpAnchors) {
+              grpColMap.set(ga.ck, ga)
+              for (const p of ga.partners) grpColMap.set(p.ck, p)
+            }
+            const compLavaList = lavaXZByComp.get(grpCompId) || []
+            for (let i = 0; i < bandH; i++) {
               const sweepAnchors = (i % 2 === 0) ? grpAnchors : [...grpAnchors].reverse()
+              const fy = baseY + i
               for (const ga of sweepAnchors) {
-                const at = ga.list[i]
+                const at = ga.list.find(t => t.layer === l0 + i)
                 if (!at) continue
                 const gaHint = Boolean(ga.partners[0]?.hasFloor) ? { x: ga.partners[0].x, y: baseY, z: ga.partners[0].z } : null
                 const standAboveAnchor = new Vec3(ga.x, baseY + i + 1, ga.z)
@@ -1412,8 +1525,53 @@ class BuildPlanner {
                   }
                 }
               }
-            }
-          } else {
+              // Immediately after all 30 wall columns of this module ring at level i are placed, pour the 6 lava[level=0] sources of this module ring at level i!
+              const levelFluids = []
+              for (const lv of compLavaList) {
+                const ft = this.tasks.get(`${lv.x},${fy},${lv.z}`)
+                if (ft && ft.kind === "fluid" && ft.name === "lava" && !claimedBandFluids.has(ft.key)) {
+                  claimedBandFluids.add(ft.key)
+                  levelFluids.push(ft)
+                }
+              }
+              if (levelFluids.length) {
+                const lastA = sweepAnchors[sweepAnchors.length - 1] || a
+                let curX = lastA.x; let curZ = lastA.z
+                const orderedFluids = []
+                while (levelFluids.length) {
+                  let bi = 0; let bd = Infinity
+                  for (let fi = 0; fi < levelFluids.length; fi++) {
+                    const d = Math.hypot(levelFluids[fi].world.x - curX, levelFluids[fi].world.z - curZ)
+                    if (d < bd) { bd = d; bi = fi }
+                  }
+                  const nextF = levelFluids.splice(bi, 1)[0]
+                  curX = nextF.world.x; curZ = nextF.world.z
+                  orderedFluids.push(nextF)
+                }
+                for (const ft of orderedFluids) {
+                  ft.verticalColumn = true
+                  ft.interleavedClimb = true
+                  ft.verticalBaseY = baseY
+                  let bestStandCol = null
+                  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                    const adjCol = grpColMap.get(`${ft.world.x + dx},${ft.world.z + dz}`)
+                    const oppTask = this.tasks.get(`${ft.world.x - dx},${fy},${ft.world.z - dz}`)
+                    if (adjCol && adjCol.list.some(t => t.layer === l0 + i)) {
+                      if (oppTask && oppTask.kind === "block" && !oppTask.info?.waterlogged) {
+                        bestStandCol = adjCol
+                        break
+                      } else if (!bestStandCol) {
+                        bestStandCol = adjCol
+                      }
+                    }
+                  }
+                  if (bestStandCol) {
+                    ft._preferredStand = new Vec3(bestStandCol.x, fy + 1, bestStandCol.z)
+                  }
+                  clusterSeq.push(ft)
+                }
+              }
+            }          } else {
             // Step 0: Place L4 base block of first floor-backed partner column from the flat deck (provides a 3-block zero-fall-damage step-down from L7!)
             if (p0HasFloor && a.partners[0].list.length > 0) {
               const p0Base = a.partners[0].list[0]
@@ -1528,6 +1686,19 @@ class BuildPlanner {
               }
               if (altKeys.length) t.altBridgeAnchorKeys = altKeys
             }
+            for (const ft of this.tasks.values()) {
+              if (ft.layer !== lBase || ft.kind !== "fluid" || ft.name !== "lava") continue
+              for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                const adjK = `${ft.world.x + dx},${ft.world.y},${ft.world.z + dz}`
+                const oppK = `${ft.world.x - dx},${ft.world.y},${ft.world.z - dz}`
+                const adjT = this.tasks.get(adjK)
+                const oppT = this.tasks.get(oppK)
+                if (lBaseGenSet.has(adjK) && oppT && oppT.kind === "block" && !oppT.info?.waterlogged) {
+                  ft._preferredStand = new Vec3(ft.world.x + dx, ft.world.y + 1, ft.world.z + dz)
+                  if (adjT?.info?.waterlogged) break
+                }
+              }
+            }
           }
         }
 
@@ -1636,15 +1807,17 @@ class BuildPlanner {
       while (q.length && steps++ < 500) {
         const [x, y, z, lvl] = q.shift()
         flowCells.add(`${x},${y},${z}`)
+        const isSourceCell = x === task.world.x && y === task.world.y && z === task.world.z
         const bk = `${x},${y - 1},${z}`
         const bt = this.tasks.get(bk)
         if (bt && bt.kind === "block") addDepTask(bt)
         if (!isSolidInDesign(x, y - 1, z)) {
-          if (this.fluidCells.has(bk) && !seen.has(bk)) {
+          const stackedAboveSameFluid = Boolean(bt && bt.kind === "fluid" && bt.name === task.name)
+          if (!stackedAboveSameFluid && this.fluidCells.has(bk) && !seen.has(bk)) {
             seen.add(bk)
             q.push([x, y - 1, z, reach])
           }
-          continue
+          if (!isSourceCell) continue
         }
         if (lvl <= 1) continue
         for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
@@ -2008,14 +2181,30 @@ class BuildPlanner {
         if (this.fluidCells.has(k)) { queue.push([nx, ny, nz, nl]); return }
         addLeak(k)
       }
+      const isSourceCellHere = x === task.world.x && y === task.world.y && z === task.world.z
       const below = W.blockAt({ x, y: y - 1, z })
       const belowKey = `${x},${y - 1},${z}`
       const belowTask = this.tasks.get(belowKey)
       const belowTemp = Boolean(this.isTempCell && this.isTempCell(x, y - 1, z))
       const belowForeignFluid = Boolean(below && solid(below) && !this.tasks.has(belowKey) && this.fluidCells.has(belowKey))
       if (belowTemp || belowForeignFluid) addTempObs(x, y - 1, z)
+      if (belowTask && belowTask.kind === "fluid" && belowTask.name === task.name) {
+        if (belowTask.status !== "completed" || belowTemp || !below || !taskMatches(below, belowTask)) {
+          addLeak(belowKey)
+        }
+        if (lvl > 1) {
+          for (const [dx, dz] of D4) visit(x + dx, y, z + dz, lvl - 1)
+        }
+        continue
+      }
       const belowTaskUnfinished = Boolean(belowTask && belowTask.kind === "block" && (belowTask.status !== "completed" || belowTemp || !below || !taskMatches(below, belowTask)))
-      if (!solid(below) || belowTaskUnfinished) { visit(x, y - 1, z, reach); continue }
+      if (!solid(below) || belowTaskUnfinished) {
+        visit(x, y - 1, z, reach)
+        if (isSourceCellHere && lvl > 1) {
+          for (const [dx, dz] of D4) visit(x + dx, y, z + dz, lvl - 1)
+        }
+        continue
+      }
       if ((belowTemp || belowForeignFluid) && this.fluidCells.has(belowKey)) {
         visit(x, y - 1, z, reach)
         if (lvl > 1) {
@@ -2065,6 +2254,10 @@ class BuildPlanner {
       return true
     }
     if (task.kind === "fluid") {
+      const belowFluid = this.tasks.get(`${task.world.x},${task.world.y - 1},${task.world.z}`)
+      if (!task.fluidForce && belowFluid && (belowFluid.kind === "fluid" || belowFluid.kind === "block") && belowFluid.status !== "completed" && belowFluid.status !== "blocked") {
+        return false
+      }
       if (!task.fluidForce && Array.isArray(task.enclosureDeps)) {
         for (const dk of task.enclosureDeps) {
           const dt = this.tasks.get(dk)
@@ -2202,6 +2395,11 @@ class BuildPlanner {
   }
 
   hasDirectlyUnfinishedBelow (task) {
+    if (task?.kind === "fluid" && task.world && this.tasks) {
+      const bf = this.tasks.get(`${task.world.x},${task.world.y - 1},${task.world.z}`)
+      if (bf && (bf.kind === "fluid" || bf.kind === "block") && bf.status !== "completed" && bf.status !== "blocked") return true
+      return false
+    }
     if (!task?.world || !this.tasks || task.kind !== "block") return false
     if (!task._belowDeps) {
       const direct = []
@@ -2375,9 +2573,15 @@ class BuildPlanner {
           const lt = this.tasks.get(lk)
           if (!lt) return false
           if (this.quarantined?.has(lk) || (lt.status === 'blocked' && (lt.totalAttempts || 0) >= 2)) return true
-          if (lt._skippedByContinue || (this.minSkipLayer && lt.layer < this.minSkipLayer) || lt.layer < task.layer - 2) {
+          if (lt._skippedByContinue || (this.minSkipLayer && lt.layer < this.minSkipLayer)) {
             const lb = this.world.blockAt(lt.world)
             return Boolean(lb && !taskMatches(lb, lt))
+          }
+          if (lt.kind === "block" && lt.status === "completed") {
+            const lb = this.world.blockAt(lt.world)
+            if (lb && !taskMatches(lb, lt)) {
+              this.reopenTask(lk, null, { forceReset: true })
+            }
           }
           return false
         })
@@ -2663,6 +2867,7 @@ class BuildPlanner {
         let activeUnreadyInCl = null
         for (let idx = cl.ptr; idx < maxLook; idx++) {
           const candT = cl.tasks[idx]
+          if (idx > cl.ptr && !group.isModuleClusterBase && ((candT?.kind === "fluid") !== (cl.tasks[cl.ptr]?.kind === "fluid") || candT?.world?.y !== cl.tasks[cl.ptr]?.world?.y)) break
           if (!candT || candT.status === "completed" || candT.status === "blocked") continue
           if (!this.usable(candT, now)) continue
           if (this.hasDirectlyUnfinishedBelow(candT)) continue
@@ -2684,7 +2889,7 @@ class BuildPlanner {
             break
           }
           if (!chosenInCl) chosenInCl = candT
-          if (!group.isModuleClusterBase && (!group.isVerticalWallBand || candT.verticalAnchorCol || candT.world.y !== cl.tasks[cl.ptr].world.y)) break
+          if (!group.isModuleClusterBase && (!group.isVerticalWallBand || candT.verticalAnchorCol || candT.world.y !== cl.tasks[cl.ptr].world.y || (candT.kind === "fluid") !== (cl.tasks[cl.ptr].kind === "fluid"))) break
         }
         if (!chosenInCl && activeUnreadyInCl) chosenInCl = activeUnreadyInCl
         if (!chosenInCl) continue
@@ -2880,7 +3085,7 @@ class BuildPlanner {
         for (let idx = cl.ptr; idx < lookLim; idx++) {
           const candT = cl.tasks[idx]
           if (!candT || !this.usable(candT, now)) continue
-          if (idx > cl.ptr && !group.isModuleClusterBase && (candT.verticalAnchorCol || candT.world.y !== headT.world.y)) break
+          if (idx > cl.ptr && !group.isModuleClusterBase && (candT.verticalAnchorCol || candT.world.y !== headT.world.y || (candT.kind === "fluid") !== (headT.kind === "fluid"))) break
           if (this.hasDirectlyUnfinishedBelow(candT)) continue
           if (this.fleet && this.fleet.coord.busyFor(this.fleet.id, candT, false)) continue
           const d = candT.world.distanceTo(botPosition)
@@ -3083,7 +3288,7 @@ class BuildPlanner {
       if (order >= 88000 && this.phaseBlocked(order)) continue
       const layer = order < 88000 ? Math.floor(order / 4) : 9999
       const hasUsable = this.groupHasUsableNow(group, now)
-      const isRetriedStragglerGroup = this.remainingCount() > 25 && hasUsable && !group.hasDependentCapOrder && layer < 9999 && (
+      const isRetriedStragglerGroup = this.remainingCount() > 25 && hasUsable && !group.isVerticalWallBand && !group.isModuleClusterBase && !group.hasDependentCapOrder && layer < 9999 && (
         (group.remaining <= 2 && !this.groupHasUnfinishedBelowMaxAttempts(group, 2)) ||
         (group.remaining <= 4 && (!this.groupHasUnfinishedBelowMaxAttempts(group, 1) || this.hasHigherLayerProgress(layer, 20)))
       )
@@ -3139,7 +3344,7 @@ class BuildPlanner {
       const g = this.orderGroups.get(order)
       if (!g || g.remaining <= 0) continue
       const l = order < 88000 ? Math.floor(order / 4) : 9999
-      const isStragglerGrp = this.remainingCount() > 25 && order < 88000 && !g.hasDependentCapOrder && (
+      const isStragglerGrp = this.remainingCount() > 25 && order < 88000 && !g.isVerticalWallBand && !g.isModuleClusterBase && !g.hasDependentCapOrder && (
         (g.remaining <= 2 && !this.groupHasUnfinishedBelowMaxAttempts(g, 2)) ||
         (g.remaining <= 4 && (!this.groupHasUnfinishedBelowMaxAttempts(g, 1) || this.hasHigherLayerProgress(l, 20)))
       )
@@ -3305,7 +3510,6 @@ class BuildPlanner {
       const isQuarantined = Boolean(this.quarantined?.has(t.key))
       if (onlyQuarantined && !isQuarantined) continue
       if (isQuarantined) {
-        if (!includeQuarantined && !isEndgame) continue
         const expired = includeExpiredQuarantined && (now - (t.quarantinedAt || 0) >= 30_000)
         if (!includeQuarantined && !isEndgame && !expired) continue
       }

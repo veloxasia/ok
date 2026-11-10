@@ -83,6 +83,8 @@ table{width:100%;border-collapse:collapse}td,th{padding:4px 6px;text-align:left;
  <button class="sec" id="pause" disabled>Pause</button>
  <button class="sec" id="resume" disabled>Resume</button>
  <button class="sec" id="stopBuild" disabled>Stop build</button>
+ <button class="ok" id="selfTestBtn" disabled title="Runs the full real-server action self-test (/ah pickaxe, /shop Quick Buy add + instant buy, walk/hop, place block, break block with pickaxe, waterlog leaves) using the exact builder code and writes every step to logger.txt">🧪 Test Real-Server Actions (logger.txt)</button>
+ <button class="sec" id="downloadLoggerBtn" title="Download logger.txt with detailed WORKED / REJECTED results">📄 Download logger.txt</button>
 </div>
 <p class="hint" id="savedInfo"></p>
 <p class="hint">Start the bots, wait until they stand in the world, then enter the build corner (lowest north-west corner of the schematic) and press Start build. A saved job resumes by itself after a restart.</p>
@@ -209,7 +211,7 @@ function showSaved(j,allowSelectSchem=false){const b=$('startBots');b.title=j?`S
 async function save(){try{if(!$('host').value.trim())throw new Error('Enter the server address first');const chosenSchem=$('schem').value;await api('/api/save',collect());S=await api('/api/state');fill();if(chosenSchem&&[...$('schem').options].some(o=>o.value===chosenSchem))$('schem').value=chosenSchem;showSaved(S.saved,false);msg('Saved');return true}catch(e){msg(e.message,1);return false}}
 $('save').onclick=save
 function setRunning(r){running=r;$('dot').className='dot'+(r?' on':'');$('runtxt').textContent=r?'Bots running':'Bots stopped';for(const id of ['startBots','startFresh'])$(id).style.display=r?'none':'';$('stopBots').style.display=r?'':'none'
- for(const id of ['build','continueBuild','pause','resume','stopBuild'])$(id).disabled=!r}
+ for(const id of ['build','continueBuild','pause','resume','stopBuild','selfTestBtn'])$(id).disabled=!r}
 const begin=async fresh=>{if(await save()){const j=await api('/api/start-bots',{fresh});msg(j.ok?'Bots starting':'Bots already running',!j.ok)}}
 $('startBots').onclick=()=>begin(false)
 $('startFresh').onclick=()=>{if(confirm('Forget the saved build and progress and start from scratch?'))begin(true)}
@@ -221,6 +223,8 @@ $('continueBuild').onclick=async()=>{if(!(await save()))return;const f=$('schem'
  if(!f||x===''||y===''||z==='')return msg('Pick a schematic and enter X, Y, Z',1);$('ox').value=x;$('oy').value=y;$('oz').value=z;cmd(`continue ${f} ${x} ${y} ${z} ${$('rot').value}${l!==''?' '+l:''}`)}
 $('copyLog').onclick=async()=>{try{await navigator.clipboard.writeText($('log').textContent);msg('Log copied')}catch{const r=document.createRange();r.selectNodeContents($('log'));getSelection().removeAllRanges();getSelection().addRange(r);msg('Press Ctrl+C to copy')}}
 $('pause').onclick=()=>cmd('pause');$('resume').onclick=()=>cmd('resume');$('stopBuild').onclick=()=>cmd('stop')
+$('selfTestBtn').onclick=async()=>{if(!(await save()))return;await cmd('selftest');msg('Running real-server self-test — watch the Log below or download logger.txt!')}
+$('downloadLoggerBtn').onclick=()=>{const a=document.createElement('a');a.href='/api/logger-txt?token='+encodeURIComponent(T);a.download='logger.txt';document.body.appendChild(a);a.click();a.remove();msg('Downloading logger.txt...')}
 
 // Download learned/ + data/ as .zip
 function triggerDownloadZip(){

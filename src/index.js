@@ -69,7 +69,7 @@ function attachConsoleReal (hub) {
         from: 'console'
       })
     }
-    if (['pause', 'resume', 'stop'].includes(cmd)) { logger.info(`console: ${cmd}`); return hub.command({ cmd, from: 'console' }) }
+    if (['pause', 'resume', 'stop', 'selftest'].includes(cmd)) { logger.info(`console: ${cmd}`); return hub.command({ cmd, from: 'console' }) }
     logger.warn(`unknown console command "${cmd}" (build, continue, pause, resume, stop)`)
   })
 }

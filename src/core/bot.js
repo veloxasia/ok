@@ -158,6 +158,12 @@ function createBuilderBot (config, fleet = null, authOpts = null) {
       if (m.cmd === 'pause') return b.pause()
       if (m.cmd === 'resume') return b.resume()
       if (m.cmd === 'stop') return b.stop()
+      if (m.cmd === 'selftest') {
+        if (!isLeader) return
+        const { runRealServerSelfTest } = require('./self-test')
+        await runRealServerSelfTest(bot, config, logger)
+        return
+      }
       if (m.cmd === 'architect') { if (b.planner) b.runArchitect(b.originVec); return }
       if (m.cmd === 'cleanup') { await b.cleanupTemporary(); return }
       if (m.cmd === 'restock') {
@@ -476,6 +482,12 @@ function createBuilderBot (config, fleet = null, authOpts = null) {
       if (command === 'verify') {
         const result = bot.builder.verifyAll()
         return reply(`verify ${result.correct}/${result.total} correct | wrong ${result.wrong} | unknown ${result.unknown}`)
+      }
+      if (command === 'selftest') {
+        reply('Running real-server action self-test (logging to logger.txt)...')
+        const { runRealServerSelfTest } = require('./self-test')
+        const res = await runRealServerSelfTest(bot, config, logger)
+        return reply(`Self-test done: ${res.passed}/${res.total} WORKED (saved to logger.txt)`)
       }
       if (command === 'cleanup') {
         let before = 0; let remaining = 0

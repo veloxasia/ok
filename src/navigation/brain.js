@@ -575,9 +575,11 @@ class Brain {
     const underFeetTask = this.bot?.builder?.planner?.tasks?.get(`${me.x},${me.y - 1},${me.z}`)
     const onIsolatedCol = Boolean(underFeetTask?.isolatedColumn || underFeetTask?.verticalAnchorCol || wasOnScaffold || this.scaffold?.onScaffold?.())
     const baseY0 = this.bot?.builder?.planner?.box?.y0 ?? -60
+    const isSweeper = this.bot?.builder?.role === 'sweeper'
     const isEndgame = (this.bot?.builder?.planner?.remainingCount?.() ?? 999) <= 150
-    // Never pearl or dig downward off a high elevated deck/roof (me.y > baseY0 + 6) to ground level unless descending a finished isolated/scaffold column or during endgame repair!
-    if (me.y > Math.floor(stand.y) + maxDrop && me.y > baseY0 + 6 && !onIsolatedCol && !isEndgame && Math.floor(stand.y) <= baseY0 + 2) {
+    const maxDrop = Number(this.config.navigation?.maxDrop ?? 3)
+    // Never pearl or dig downward off a high elevated deck/roof (me.y > baseY0 + 6) to a lower deck or ground level unless descending a finished isolated/scaffold column, sweeper, or during endgame repair!
+    if (me.y > Math.floor(stand.y) + maxDrop && me.y > baseY0 + 6 && !onIsolatedCol && !isEndgame && !isSweeper) {
       return false
     }
     const b = boundsOf(region.cells, 48)

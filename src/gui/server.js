@@ -266,6 +266,13 @@ function buildLearnedAndDataZip () {
     ...collectFolderEntries(learnedDir, 'learned'),
     ...collectFolderEntries(dataDir, 'data')
   ]
+  const rootLogger = path.join(root, 'logger.txt')
+  if (fs.existsSync(rootLogger)) {
+    try {
+      const st = fs.statSync(rootLogger)
+      entries.push({ name: 'logger.txt', data: fs.readFileSync(rootLogger), mtime: st.mtime })
+    } catch {}
+  }
   const sDir = stateFolder()
   if (path.resolve(sDir) !== path.resolve(dataDir)) {
     const sharedEntries = collectFolderEntries(sDir, 'shared-data')
@@ -362,6 +369,21 @@ function start (port = 0, host = process.env.MHB_GUI_HOST || '0.0.0.0') {
         return res.end(html)
       }
 
+      if (req.method === 'GET' && url.pathname === '/api/logger-txt') {
+        const qToken = url.searchParams.get('token') || req.headers['x-gui-token']
+        if (qToken !== token) return json(403, { error: 'bad token' })
+        const p1 = path.join(root, 'logger.txt')
+        const p2 = path.join(dataDir, 'logger.txt')
+        const fp = fs.existsSync(p1) ? p1 : (fs.existsSync(p2) ? p2 : null)
+        const content = fp ? fs.readFileSync(fp, 'utf8') : 'No logger.txt generated yet. Start bots and click "🧪 Test Real-Server Actions (logger.txt)" in the GUI.\n'
+        res.writeHead(200, {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Content-Disposition': 'attachment; filename="logger.txt"',
+          'Cache-Control': 'no-store'
+        })
+        return res.end(content)
+      }
+
       if (req.method === 'GET' && url.pathname === '/api/download-data-zip') {
         const qToken = url.searchParams.get('token') || req.headers['x-gui-token']
         if (qToken !== token) return json(403, { error: 'bad token' })
@@ -436,7 +458,7 @@ function start (port = 0, host = process.env.MHB_GUI_HOST || '0.0.0.0') {
       }
       if (url.pathname === '/api/cmd') {
         const c = String(body.cmd || '').trim()
-        if (!/^(build .+|continue .+|pause|resume|stop)$/.test(c)) return json(400, { error: 'unknown command' })
+        if (!/^(build .+|continue .+|pause|resume|stop|selftest)$/.test(c)) return json(400, { error: 'unknown command' })
         if (/^(build|continue) /.test(c)) {
           try {
             const parts = c.split(/\s+/).slice(1)

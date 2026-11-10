@@ -130,12 +130,39 @@ class BuildPlanner {
     }
     for (const [ord, list] of groups.entries()) {
       const frac = +(ord - Math.floor(ord)).toFixed(2)
-      // Keep sequential chest pairs (.25/.30) and hopper chains (.40-.49) assigned to one primary worker so two bots never collide inside a 1-wide trench
+      // Group adjacent chests (.25/.30) and hopper chains (.40-.49) into connected components so bots never collide in the same trench, while distributing independent columns across the whole fleet!
       if (frac >= 0.24 && frac <= 0.49 && list.every(t => /^(chest|trapped_chest|ender_chest|hopper)$/.test(t.name))) {
-        const owner = allWorkers[Math.min(1, allWorkers.length - 1)] ?? 0
-        for (const t of list) t.owner = owner
-        const grp = this.orderGroups.get(ord)
-        if (grp && count > 1) { grp.isSingleWorkerChain = true; grp.chainOwner = owner }
+        const visited = new Set()
+        const compBuckets = []
+        for (let i = 0; i < list.length; i++) {
+          if (visited.has(i)) continue
+          const comp = []
+          const q = [i]
+          visited.add(i)
+          while (q.length) {
+            const cur = list[q.pop()]
+            comp.push(cur)
+            for (let j = 0; j < list.length; j++) {
+              if (visited.has(j)) continue
+              const other = list[j]
+              if (Math.abs(cur.world.x - other.world.x) + Math.abs(cur.world.z - other.world.z) <= 2) {
+                visited.add(j)
+                q.push(j)
+              }
+            }
+          }
+          let sx = 0; let sz = 0
+          for (const t of comp) { sx += t.world.x; sz += t.world.z }
+          compBuckets.push({ cid: compBuckets.length, items: comp, cx: sx / comp.length, cz: sz / comp.length })
+        }
+        if (compBuckets.length <= 1 && list.length <= 20) {
+          const owner = allWorkers[Math.min(1, allWorkers.length - 1)] ?? 0
+          for (const t of list) t.owner = owner
+          const grp = this.orderGroups.get(ord)
+          if (grp && count > 1) { grp.isSingleWorkerChain = true; grp.chainOwner = owner }
+        } else {
+          partitionClusters(compBuckets, allWorkers)
+        }
       } else if (list.some(t => t.verticalClusterId != null)) {
         const byCluster = new Map()
         const unclustered = []
@@ -805,6 +832,7 @@ class BuildPlanner {
     const V = { up: [0, 1, 0], down: [0, -1, 0], north: [0, 0, -1], south: [0, 0, 1], west: [-1, 0, 0], east: [1, 0, 0] }
     const isValidSchematicRef = (rt, fname) => {
       if (!rt || rt.kind !== 'block' || rt.info?.fragile) return false
+      if (rt.name === 'hopper') return false
       if (/^(repeater|comparator|daylight_detector)$|_carpet$/.test(rt.name || '')) return false
       if (/_slab$/.test(rt.name || '')) {
         const rp = rt.properties || {}
@@ -814,11 +842,41 @@ class BuildPlanner {
       if (/_trapdoor$/.test(rt.name || '')) return Boolean(fname !== 'up' && fname !== 'down')
       return true
     }
+    // Never promote a block if a same-layer hopper points directly into it (the target block must be placed BEFORE the hopper!)
+    const hopperTargets = new Set()
+    for (const t of this.tasks.values()) {
+      if (t.kind !== 'block' || t.name !== 'hopper') continue
+      const f = t.properties?.facing || 'down'
+      const v = V[f]
+      if (!v || f === 'down' || f === 'up') continue
+      hopperTargets.add(`${t.world.x + v[0]},${t.world.y + v[1]},${t.world.z + v[2]}`)
+    }
+    const moveTaskOrder = (t, newOrder) => {
+      if (newOrder === t.order) return false
+      const oldGroup = this.orderGroups.get(t.order)
+      if (oldGroup) {
+        oldGroup.remaining = Math.max(0, oldGroup.remaining - 1)
+        oldGroup.cells.get(t.cellKey)?.delete(t)
+        if (oldGroup.remaining === 0) this.orderGroups.delete(t.order)
+      }
+      t.order = newOrder
+      let newGroup = this.orderGroups.get(newOrder)
+      if (!newGroup) {
+        newGroup = { remaining: 0, cells: new Map() }
+        this.orderGroups.set(newOrder, newGroup)
+      }
+      newGroup.remaining += 1
+      let set = newGroup.cells.get(t.cellKey)
+      if (!set) { set = new Set(); newGroup.cells.set(t.cellKey, set) }
+      set.add(t)
+      return true
+    }
     const promotedFree = new Set()
     for (let pass = 0; pass < 3; pass++) {
       let changed = false
       for (const t of this.tasks.values()) {
         if (t.kind !== 'block' || t.layer <= 0 || t.order >= 88000) continue
+        if (t.name === 'hopper' || hopperTargets.has(t.key)) continue
         const nonHyp = t.info?.specs?.filter(sp => !sp.hyp) || []
         const checkSpecs = nonHyp.length ? nonHyp : [t.info?.specs?.[0]].filter(Boolean)
         const isFreeBlock = checkSpecs.length === 1 && checkSpecs[0].tag === 'free'
@@ -845,27 +903,38 @@ class BuildPlanner {
           if (isFreeBlock) promotedFree.add(t.key)
           const newOrder = +(minSameLayerLaterOrder + 0.3).toFixed(2)
           if (newOrder !== t.order && newOrder < t.layer * 4 + 2.25) {
-            const oldGroup = this.orderGroups.get(t.order)
-            if (oldGroup) {
-              oldGroup.remaining = Math.max(0, oldGroup.remaining - 1)
-              oldGroup.cells.get(t.cellKey)?.delete(t)
-              if (oldGroup.remaining === 0) this.orderGroups.delete(t.order)
-            }
-            t.order = newOrder
-            let newGroup = this.orderGroups.get(newOrder)
-            if (!newGroup) {
-              newGroup = { remaining: 0, cells: new Map() }
-              this.orderGroups.set(newOrder, newGroup)
-            }
-            newGroup.remaining += 1
-            let set = newGroup.cells.get(t.cellKey)
-            if (!set) { set = new Set(); newGroup.cells.set(t.cellKey, set) }
-            set.add(t)
-            changed = true
+            if (moveTaskOrder(t, newOrder)) changed = true
           }
         }
       }
       if (!changed) break
+    }
+    // Ensure every horizontal hopper chain is ordered strictly AFTER its non-hopper target block on the same layer
+    for (const t of this.tasks.values()) {
+      if (t.kind !== 'block' || t.name !== 'hopper' || t.order >= 88000) continue
+      let cur = t
+      let depth = 0
+      const seen = new Set()
+      while (cur && cur.kind === 'block' && cur.name === 'hopper' && !seen.has(cur.key)) {
+        seen.add(cur.key)
+        const f = cur.properties?.facing || 'down'
+        const v = V[f]
+        if (!v || f === 'down' || f === 'up') { cur = null; break }
+        const nextTask = this.tasks.get(`${cur.world.x + v[0]},${cur.world.y + v[1]},${cur.world.z + v[2]}`)
+        if (nextTask && nextTask.kind === 'block' && nextTask.name === 'hopper' && nextTask.layer === t.layer) {
+          depth++
+          cur = nextTask
+        } else {
+          cur = nextTask
+          break
+        }
+      }
+      if (cur && cur.kind === 'block' && cur.layer === t.layer && cur.order < 88000) {
+        const minHopperOrder = +(cur.order + 0.05 + Math.min(9, depth) * 0.01).toFixed(2)
+        if (t.order <= cur.order && minHopperOrder < t.layer * 4 + 2.35) {
+          moveTaskOrder(t, minHopperOrder)
+        }
+      }
     }
   }
 
@@ -941,7 +1010,7 @@ class BuildPlanner {
   computeBridgeSeedsAndChains () {
     const isStructural = t => Boolean(
       t && t.kind === "block" && t.order < 88000 && !t.info?.fragile &&
-      t.info?.phase === 0 && !/_(trapdoor|door|fence_gate|sign|banner)$/.test(t.name || "")
+      t.info?.phase === 0 && !/_(trapdoor|door|fence_gate|sign|banner)$|^hopper$/.test(t.name || "")
     )
     const byLayer = new Map()
     let minLayer = Infinity
@@ -2203,7 +2272,7 @@ class BuildPlanner {
         if (belowTask.status !== "completed" || belowTemp || !below || !taskMatches(below, belowTask)) {
           addLeak(belowKey)
         }
-        if (lvl > 1) {
+        if (isSourceCellHere && lvl > 1) {
           for (const [dx, dz] of D4) visit(x + dx, y, z + dz, lvl - 1)
         }
         continue
@@ -2389,14 +2458,23 @@ class BuildPlanner {
         }
         const n = this.tasks.get(`${rx},${ry},${rz}`) || (/_door$/.test(this.tasks.get(`${rx},${ry - 1},${rz}`)?.name || '') ? this.tasks.get(`${rx},${ry - 1},${rz}`) : null)
         if (n && n.kind === 'block' && n.status !== 'completed') {
-          if (task.info?.fragile || task.name === 'hopper') {
+          if (task.info?.fragile) {
             if (n.status === 'blocked' && (n._autoReopenCount || 0) < 1 && Date.now() - (n._lastAutoReopen || 0) > 15_000) {
               n._lastAutoReopen = Date.now()
               n._autoReopenCount = (n._autoReopenCount || 0) + 1
               this.reopenTask(n.key, this.fleet?.index, { forceReset: true })
             }
             if (n.status !== 'blocked') sawPending = true
-          } else if (n.status !== 'blocked' && n.attempts < 6 && !n.info?.fragile) {
+          } else if (task.name === 'hopper') {
+            if (n.status === 'blocked' && (n._autoReopenCount || 0) < 1 && Date.now() - (n._lastAutoReopen || 0) > 15_000) {
+              n._lastAutoReopen = Date.now()
+              n._autoReopenCount = (n._autoReopenCount || 0) + 1
+              this.reopenTask(n.key, this.fleet?.index, { forceReset: true })
+            }
+            if (n.status !== 'blocked' && n.order <= task.order && (n.attempts || 0) < 3 && (n.totalAttempts || 0) < 6) {
+              sawPending = true
+            }
+          } else if (n.status !== 'blocked' && n.order <= task.order && n.name !== 'hopper' && n.attempts < 4 && !n.info?.fragile) {
             sawPending = true
           }
         }
@@ -2767,6 +2845,7 @@ class BuildPlanner {
           }
           if (t.name === 'observer' && (t.properties?.facing === 'down' || t.properties?.facing === 'up')) continue
           if (this.hasDirectlyUnfinishedBelow(t)) continue
+          if ((t.info?.fragile || t.name === 'hopper') && this.refPending(t)) continue
           if (this.fleet && group.remaining <= 4 && this.fleet.coord.busyFor(this.fleet.id, t, false)) continue
           return true
         }
@@ -3397,7 +3476,8 @@ class BuildPlanner {
           if ((t.attempts || 0) >= 2 && this.remainingCount() > 25) continue
           if (this.fleet && this.effectiveOwner(t) !== this.fleet.index && (t.status === "failed" || (t.attempts || 0) >= 1)) continue
           if (this.fleet && this.fleet.coord.busyFor(this.fleet.id, t, true)) continue
-          if ((t.kind === "fluid" || t.kind === "waterlog" || t.info?.fragile || t.name === "hopper") && (!this.isReady(t) || this.refPending(t))) continue
+          if ((t.kind === "fluid" || t.kind === "waterlog" || t.info?.fragile) && (!this.isReady(t) || this.refPending(t))) continue
+          if (t.name === "hopper" && this.refPending(t)) continue
           if (this.hasDirectlyUnfinishedBelow(t)) continue
           if (activeWf && !this.isReady(t) && this.refPending(t)) continue
           if (Number.isFinite(minOpenLayer) && t.order < 88000 && t.layer > minOpenLayer && !t.isolatedColumn && !t.verticalColumn && this.hasUnfinishedBelow(t)) continue

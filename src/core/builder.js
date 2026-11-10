@@ -123,7 +123,14 @@ class ConstructionEngine {
     this.placer = new Placer({
       bot: this.bot, world: this.world, config: this.config, logger: this.logger, nav: this.navigation, interaction: this.interaction,
       isReserved: cell => this.isReserved(cell), materials: this.materials, aim: this.aim, look: this.look, scaffold: this.scaffold, ground: this.ground, learner: this.learner, experience: this.experience,
-      interrupt: () => (this.stopRequested ? 'stop requested' : this.paused ? 'paused' : null)
+      interrupt: () => {
+        if (this.stopRequested) return 'stop requested'
+        if (this.paused) return 'paused'
+        if (this.placer?.currentTask && this.placer.currentTask.status === 'completed' && /^(walk|approach|starting|tower|edge|providing)/.test(this.placer.phase || '')) {
+          return 'task completed by partner bot'
+        }
+        return null
+      }
     })
     this.placer.brain = this.brain
     const { LookaheadEngine } = require('../navigation/lookahead')

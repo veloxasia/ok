@@ -45,7 +45,15 @@ class AimController {
   async correct (dir) {
     const want = this.desired(dir)
     const e = this.bot.entity
-    if (Math.abs(wrap(want.yaw - e.yaw)) < 0.25 * DEG && Math.abs(want.pitch - e.pitch) < 0.25 * DEG) return
+    const m = this.bot.__motion
+    const flushedYaw = Number.isFinite(m?.tickYaw) ? m.tickYaw : e.yaw
+    const flushedPitch = Number.isFinite(m?.tickPitch) ? m.tickPitch : e.pitch
+    if (
+      Math.abs(wrap(want.yaw - e.yaw)) < 0.25 * DEG &&
+      Math.abs(want.pitch - e.pitch) < 0.25 * DEG &&
+      Math.abs(wrap(want.yaw - flushedYaw)) < 0.5 * DEG &&
+      Math.abs(want.pitch - flushedPitch) < 0.5 * DEG
+    ) return
     await this.sweep(dir)
   }
 
@@ -62,21 +70,26 @@ class AimController {
     const y0 = bot.entity.yaw; const p0 = bot.entity.pitch
     const dy = wrap(ty - y0); const dp = tp - p0
     const amp = Math.max(Math.abs(dy), Math.abs(dp))
-    if (amp < 0.2 * DEG) return
+    const m = bot.__motion
+    const flushedYaw = Number.isFinite(m?.tickYaw) ? m.tickYaw : y0
+    const flushedPitch = Number.isFinite(m?.tickPitch) ? m.tickPitch : p0
+    const unflushed = Math.max(Math.abs(wrap(ty - flushedYaw)), Math.abs(tp - flushedPitch))
+    if (amp < 0.2 * DEG && unflushed < 0.5 * DEG) return
     bot.__looking = true
     try {
-      // If MotionGuard is attached, `bot.look` already steps once per physics tick within maxYawStep/maxPitchStep.
-      // Calling `bot.look(ty, tp, true)` directly avoids double-throttling while guaranteeing the exact final angle!
+      // If MotionGuard is attached, `bot.look` steps within maxYawStep/maxPitchStep, and its final origLook() updates
+      // bot.entity.yaw/pitch synchronously in memory; always await nextTick(bot) so physicsTick flushes the rotation packet
+      // to the server BEFORE sendPlace sends use_item_on (eliminating WRONG_STATE on observers/pistons/droppers/repeaters)!
       if (bot.__motion) {
-        await bot.look(ty, tp, true)
-        if (amp > 55 * DEG) await nextTick(bot)
+        if (amp >= 0.2 * DEG) await bot.look(ty, tp, true)
+        await nextTick(bot)
       } else {
         const ticks = Math.max(1, Math.min(3, Math.ceil(amp / (45 * DEG))))
         for (let i = 1; i <= ticks; i++) {
           const t = i / ticks
           const f = t * t * t * (10 - 15 * t + 6 * t * t)
           await bot.look(quant(y0 + dy * f), Math.max(-89.7 * DEG, Math.min(89.7 * DEG, quant(p0 + dp * f))), true)
-          if (i < ticks) await nextTick(bot)
+          await nextTick(bot)
         }
       }
     } finally {

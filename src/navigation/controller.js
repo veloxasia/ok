@@ -414,6 +414,15 @@ class NavigationController {
         await sleep(400)
         checkAbort()
         if (done || !bot.entity) return
+        if (typeof bot.builder?.placer?.interrupt === 'function') {
+          const ir = bot.builder.placer.interrupt()
+          if (ir) {
+            this.stop()
+            const err = new Error(`interrupted: ${ir}`)
+            err.code = 'INTERRUPTED'
+            throw err
+          }
+        }
         const p = bot.entity.position
         if (p.distanceTo(target) <= radius + 0.3) return
         let working = false

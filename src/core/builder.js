@@ -348,7 +348,7 @@ class ConstructionEngine {
     this.buildMemory.applyToPlanner(this.planner, Vec3)
     if (saved?.planner) this.planner.restore(saved.planner)
     if (saved?.tempBlocks) this.scaffold.setCreated(saved.tempBlocks)
-    if (explicitStartLayer !== null || continueMode || this.planner.completed.size >= 100) {
+    if (explicitStartLayer !== null || (!saved?.planner && (continueMode || this.planner.completed.size >= 100))) {
       this.planner.autoFastForwardCompletedLayers?.(explicitStartLayer)
     }
 

@@ -391,22 +391,29 @@ class Placer {
     for (let i = 1; i <= n; i++) {
       const px = e.position.x + (stand.x - e.position.x) * i / n
       const pz = e.position.z + (stand.z - e.position.z) * i / n
-      const latR = i <= 1 ? 0.16 : 0.25
+      const latR = i <= 1 ? 0.16 : 0.26
+      let aabbFloorCorners = 0
+      let sawBelowLava = false
       for (const [ox, oz] of [[0, 0], [-latR, -latR], [latR, -latR], [-latR, latR], [latR, latR]]) {
         const x = Math.floor(px + ox); const z = Math.floor(pz + oz)
         const feetB = this.world.blockAt(new Vec3(x, y0, z))
         const headB = this.world.blockAt(new Vec3(x, y0 + 1, z))
         const onBotSlab = isBottomSlab(feetB) || isLowFloor(feetB)
         if (!(isBodyFree(feetB) || onBotSlab || feetB?.name === 'water') || !isBodyFree(headB)) return false
+        if (feetB?.name === 'lava') return false
         const fl = this.world.blockAt(new Vec3(x, y0 - 1, z))
         if (fl && /ice$/.test(fl.name)) onIce = true
-        if (fl?.name === 'lava' || feetB?.name === 'lava') return false
+        if (fl?.name === 'lava') sawBelowLava = true
+        if ((ox !== 0 || oz !== 0) && (onBotSlab || isFullTop(fl) || iceStandOk(this.world, new Vec3(x, y0, z))) && !this.aim?.isHazard?.(new Vec3(x, y0, z))) {
+          aabbFloorCorners++
+        }
       }
+      if (sawBelowLava && aabbFloorCorners < 2) return false
       const cx = Math.floor(px); const cz = Math.floor(pz)
       const cFeet = this.world.blockAt(new Vec3(cx, y0, cz))
       const cFl = this.world.blockAt(new Vec3(cx, y0 - 1, cz))
       const cSlab = isBottomSlab(cFeet) || isLowFloor(cFeet)
-      let centerFloorOk = (cSlab || isFullTop(cFl) || iceStandOk(this.world, new Vec3(cx, y0, cz))) && !this.aim?.isHazard?.(new Vec3(cx, y0, cz))
+      let centerFloorOk = ((cSlab || isFullTop(cFl) || iceStandOk(this.world, new Vec3(cx, y0, cz))) && !this.aim?.isHazard?.(new Vec3(cx, y0, cz))) || aabbFloorCorners >= 2
       if (!centerFloorOk && i <= 2) {
         const fcStart = feetCellOf(this.world, e.position)
         if (fcStart.x === startCell.x && fcStart.z === startCell.z && Math.hypot(px - (fcStart.x + 0.5), pz - (fcStart.z + 0.5)) <= 0.78) {
@@ -429,6 +436,7 @@ class Placer {
         return false
       }
     }
+    const isDiagStep = !isGapHop && startCell.x !== endCell.x && startCell.z !== endCell.z
     const ux = (stand.x - e.position.x) / Math.max(0.01, dist0)
     const uz = (stand.z - e.position.z) / Math.max(0.01, dist0)
     const nearLedge = Boolean(this.bot.builder?.fallGuard?.hazardAt?.(stand.x + ux * 0.42, y0, stand.z + uz * 0.42, 2))
@@ -460,14 +468,16 @@ class Placer {
             break
           }
           const v = Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z)
-          if ((narrowCatwalk && !isGapHop && bot.entity.onGround) || (nearLedge && dist < (isGapHop ? 0.55 : 0.35))) {
+          if (isDiagStep && dist >= 0.34) {
+            if (bot.getControlState('sneak')) bot.setControlState('sneak', false)
+          } else if ((narrowCatwalk && !isGapHop && bot.entity.onGround) || (nearLedge && dist < (isGapHop ? 0.55 : 0.35))) {
             bot.setControlState('sneak', true)
           }
           if (dist < 0.24 && v < (onIce ? 0.08 : 0.14)) break
           const coast = v * drag / (1 - drag)
           const want = new Set()
           if ((dist > coast + (onIce ? 0.15 : 0.08) || (isGapHop && !jumpedGap)) && !(isGapHop && jumpedGap && dist < 0.45)) {
-            if ((dist > 2.15 || isGapHop) && typeof bot.look === 'function') {
+            if ((dist > 2.15 || isGapHop || isDiagStep) && typeof bot.look === 'function') {
               const wantYaw = Math.atan2(-dx, -dz)
               bot.look(wantYaw, bot.entity.pitch, true)
             }
@@ -498,7 +508,7 @@ class Placer {
         if (nearLedge || narrowCatwalk || onIce || bot.getControlState('sneak')) this.setSneak(false)
       }
     }
-    if (isGapHop) await require('../recovery/fall-guard').withHold(bot, runHopLoop)
+    if (isGapHop || isDiagStep) await require('../recovery/fall-guard').withHold(bot, runHopLoop)
     else await runHopLoop()
     const endPos = bot.entity?.position
     return Boolean(endPos && Math.hypot(stand.x - endPos.x, stand.z - endPos.z) <= 0.36 && Math.abs(stand.y - endPos.y) <= 0.55)
@@ -1441,6 +1451,22 @@ class Placer {
       const ok = cs.some(c => !this.brain || this.reachVerdict(this.walkStandOf(c)) !== 'no')
       reachStandMemo.set(ck, ok)
       return ok
+    }
+    // Before evaluating under-deck hang or reference candidates for task.world, clear any temporary scaffold/catwalk block sitting directly at task.world.offset(0, 1, 0) or task.world.offset(0, 2, 0)
+    for (const dyUp of [1, 2]) {
+      const aboveCell = task.world.offset(0, dyUp, 0)
+      const ak = key(aboveCell)
+      const ab = this.world.blockAt(aboveCell)
+      const aTask = this.planner?.tasks?.get(ak)
+      const isTempAbove = Boolean(ab && !isAirLike(ab) && (this.scaffold?.contains?.(aboveCell) || this.planner?.isTempCell?.(aboveCell.x, aboveCell.y, aboveCell.z) || (ab.name === this.scaffold?.itemName && (!aTask || aTask.kind === 'fluid' || aTask.status !== 'completed'))))
+      if (isTempAbove) {
+        try {
+          await this.digBlock(aboveCell, { allowScaffold: false })
+          this.scaffold?.created?.delete(ak)
+          this.planner?.fleet?.coord?.removeTempBlock?.(ak, this.planner?.fleet?.id)
+          this.invalidateWorldCaches()
+        } catch {}
+      }
     }
     for (const R of options) {
       this.check()

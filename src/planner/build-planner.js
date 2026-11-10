@@ -109,6 +109,7 @@ class BuildPlanner {
     }
     const { builderWorkerIndices } = require('../fleet/sweeper')
     const allWorkers = builderWorkerIndices(count, this.config)
+    this.fleet.builders = allWorkers
     const partitionClusters = (clusterBuckets, workerIds) => {
       if (!clusterBuckets.length) return
       if (workerIds.length <= 1 || clusterBuckets.length === 1) {
@@ -191,6 +192,14 @@ class BuildPlanner {
 
   ownCount () { let n = 0; for (const t of this.tasks.values()) if (t.owner === this.fleet?.index) n++; return n }
 
+  nextBuilderOwner (currentOwner) {
+    const builders = this.fleet?.builders
+    if (!builders || !builders.length) return ((currentOwner ?? this.fleet?.index ?? 0) + 1) % Math.max(1, this.fleet?.count || 1)
+    const cur = currentOwner ?? this.fleet?.index ?? builders[0]
+    const idx = builders.indexOf(cur)
+    return builders[(idx >= 0 ? idx + 1 : 0) % builders.length]
+  }
+
   quarantineTask (task, reason = null) {
     if (!task || task.status === "completed") return
     if (!this.quarantined) this.quarantined = new Set()
@@ -228,15 +237,22 @@ class BuildPlanner {
       if (e.reopen) {
         const t = this.tasks.get(e.key)
         if (t && !this.isCorrect(t)) {
-          if ((t._skippedByContinue || (this.minSkipLayer && t.layer < this.minSkipLayer)) && !e.forceUnquarantine) continue
-          if (this.quarantined?.has(t.key) && !e.forceUnquarantine) continue
+          const wasQuarantined = Boolean(this.quarantined?.has(t.key))
+          if ((t._skippedByContinue || (this.minSkipLayer && t.layer < this.minSkipLayer)) && !e.forceUnquarantine && !wasQuarantined) continue
           if (t.kind === "waterlog") {
             const parent = this.tasks.get(t.parentKey)
             if (!parent || parent.status !== "completed") continue
           }
+          t._skippedByContinue = false
           t.deferredUntil = 0
           t.anyUntil = 0
-          if (e.ownerIndex != null && t.status !== "completed") {
+          if (wasQuarantined) {
+            t.quarantineRevives = (t.quarantineRevives || 0) + 1
+            t.attempts = 0
+            t.totalAttempts = 0
+            t.unsafeCount = 0
+            t.forceSupport = true
+          } else if (e.ownerIndex != null && t.status !== "completed") {
             t.attempts = Math.min(t.attempts || 0, 1)
             t.totalAttempts = Math.min(t.totalAttempts || 0, 2)
             t.forceSupport = true
@@ -2187,6 +2203,10 @@ class BuildPlanner {
         const dTemp = Boolean(this.isTempCell && this.isTempCell(dt.world.x, dt.world.y, dt.world.z))
         if (dTemp) addTempObs(dt.world.x, dt.world.y, dt.world.z)
         const db = W.blockAt(dt.world)
+        if (!dTemp && db && !taskMatches(db, dt) && dt.status === "completed") {
+          dt._skippedByContinue = false
+          this.reopenTask(dk, this.fleet?.index, { forceReset: true, forceUnquarantine: true })
+        }
         if (dt.status !== "completed" || (!dTemp && (!db || !taskMatches(db, dt)))) {
           addLeak(dk)
         }
@@ -2670,15 +2690,25 @@ class BuildPlanner {
         const hasUnsealableLowerLeak = fc.leaks.some(lk => {
           const lt = this.tasks.get(lk)
           if (!lt) return false
+          const isImmediateCapBelow = lt.kind === 'block' && lt.layer >= task.layer - 1
+          if (isImmediateCapBelow) {
+            const lb = this.world.blockAt(lt.world)
+            if (lb && !taskMatches(lb, lt) && (lt.status === 'completed' || lt._skippedByContinue)) {
+              lt._skippedByContinue = false
+              this.reopenTask(lk, this.fleet?.index, { forceReset: true, forceUnquarantine: true })
+              return false
+            }
+          }
           if (this.quarantined?.has(lk) || (lt.status === 'blocked' && (lt.totalAttempts || 0) >= 2)) return true
-          if (lt._skippedByContinue || (this.minSkipLayer && lt.layer < this.minSkipLayer)) {
+          if (lt._skippedByContinue || (this.minSkipLayer && lt.layer < this.minSkipLayer && !isImmediateCapBelow)) {
             const lb = this.world.blockAt(lt.world)
             return Boolean(lb && !taskMatches(lb, lt))
           }
           if (lt.kind === "block" && lt.status === "completed") {
             const lb = this.world.blockAt(lt.world)
             if (lb && !taskMatches(lb, lt)) {
-              this.reopenTask(lk, null, { forceReset: true })
+              lt._skippedByContinue = false
+              this.reopenTask(lk, null, { forceReset: true, forceUnquarantine: true })
             }
           }
           return false
@@ -3531,7 +3561,7 @@ class BuildPlanner {
         }
       }
       if (/is busy with another worker/i.test(task.lastError) && this.fleet && this.fleet.count > 1) {
-        task.owner = ((task.owner ?? this.fleet.index) + 1) % this.fleet.count
+        task.owner = this.nextBuilderOwner(task.owner)
       }
       task.status = 'deferred'
       task.deferredUntil = Date.now() + (error?.code === 'UNSAFE' ? 2_500 : 2_000)
@@ -3552,7 +3582,7 @@ class BuildPlanner {
       task.forceSupport = true
       task.hintFailed = true
       if (this.fleet && this.fleet.count > 1) {
-        const nextOwner = ((task.owner ?? this.fleet.index) + 1) % this.fleet.count
+        const nextOwner = this.nextBuilderOwner(task.owner)
         task.owner = nextOwner
         this.fleet.coord.reopen?.(task.key, this.fleet.id, nextOwner)
         this.logger?.info?.(`QUARANTINE-HANDOFF: ${task.name}@${task.key} failed 2x; handing off to worker #${nextOwner + 1} with extra support enabled`)
@@ -3600,6 +3630,8 @@ class BuildPlanner {
     let n = 0
     const now = Date.now()
     const isEndgame = this.remainingCount() <= 25
+    const curOrder = this.orders.find(o => (this.orderGroups.get(o)?.remaining || 0) > 0)
+    const curLayer = curOrder !== undefined && curOrder < 88000 ? Math.floor(curOrder / 4) : 0
     for (const t of this.tasks.values()) {
       if (t.status === 'completed') continue
       if ((t._skippedByContinue || (this.minSkipLayer && t.layer < this.minSkipLayer)) && !includeQuarantined) continue
@@ -3610,8 +3642,10 @@ class BuildPlanner {
       const isQuarantined = Boolean(this.quarantined?.has(t.key))
       if (onlyQuarantined && !isQuarantined) continue
       if (isQuarantined) {
+        const effTaskLayer = t.order < 88000 ? Math.max(t.layer, Math.floor(t.order / 4)) : t.layer
+        const nearActiveLayer = effTaskLayer >= curLayer - 1
         const maskChanged = Boolean(t.world && this.neighborSolidMask(t.world) !== t._quarantineMask)
-        const expired = includeExpiredQuarantined && (now - (t.quarantinedAt || 0) >= 45_000) && maskChanged && (t.quarantineRevives || 0) < 1
+        const expired = includeExpiredQuarantined && nearActiveLayer && (now - (t.quarantinedAt || 0) >= 45_000) && maskChanged && (t.quarantineRevives || 0) < 1
         if (!includeQuarantined && !isEndgame && !expired) continue
         if (isEndgame && !includeQuarantined && (t.quarantineRevives || 0) >= 3) continue
       }
@@ -3629,7 +3663,7 @@ class BuildPlanner {
           t.unsafeCount = 0
           t.forceSupport = true
           if (this.fleet && this.fleet.count > 1) {
-            t.owner = ((t.owner ?? this.fleet.index) + 1) % this.fleet.count
+            t.owner = this.nextBuilderOwner(t.owner)
             this.fleet.coord.reopen?.(t.key, this.fleet.id, t.owner)
           }
         } else {
@@ -3767,7 +3801,7 @@ class BuildPlanner {
     for (const task of this.tasks.values()) {
       const effLayer = task.order >= 88000 && task.order < 90000
         ? Math.floor(task.order - 88000)
-        : task.layer
+        : (task.order < 88000 ? Math.max(task.layer, Math.floor(task.order / 4)) : task.layer)
       if (effLayer < targetLayer) {
         task._skippedByContinue = true
         this.blocked.delete(task.key)
@@ -3835,7 +3869,8 @@ class BuildPlanner {
       const aboveTot = effTotal(l + 1)
       const aboveDone = doneByLayer.get(l + 1) || 0
       const aboveRatio = aboveTot > 0 ? aboveDone / aboveTot : 0
-      if (ratio >= 0.80 || aboveRatio >= 0.70) {
+      const isImmediateBelowActive = (l === highestActiveLayer - 1)
+      if (isImmediateBelowActive ? ratio >= 0.98 : (ratio >= 0.85 || aboveRatio >= 0.75)) {
         autoFloorLayer = Math.max(autoFloorLayer, l + 1)
       }
     }

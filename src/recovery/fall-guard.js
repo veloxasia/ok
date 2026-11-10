@@ -209,13 +209,15 @@ class FallGuard {
     const steps = [0.35, 0.65, 0.95, Math.min(1.25, dist)]
     // Check if (px, pz) is supported by an adjacent solid wall/column under the player's ±0.26m AABB while walking parallel or toward that wall
     const aabbSupported = (px, pz) => {
-      for (const [ox, oz] of [[0.26, 0], [-0.26, 0], [0, 0.26], [0, -0.26]]) {
+      let cornerCount = 0
+      for (const [ox, oz] of [[0.26, 0], [-0.26, 0], [0, 0.26], [0, -0.26], [0.26, 0.26], [0.26, -0.26], [-0.26, 0.26], [-0.26, -0.26]]) {
         const sx = Math.floor(px + ox); const sz = Math.floor(pz + oz)
         if (sx === Math.floor(px) && sz === Math.floor(pz)) continue
         if (this.floorWithin(sx + 0.5, y, sz + 0.5, 0) && !this.hazardAt(sx + 0.5, y, sz + 0.5, 1)) {
+          cornerCount++
           const curDistToWall = Math.hypot((sx + 0.5) - x, (sz + 0.5) - z)
           const nextDistToWall = Math.hypot((sx + 0.5) - px, (sz + 0.5) - pz)
-          if (nextDistToWall <= curDistToWall + 0.05 || (Math.abs(ox) > 0 ? Math.abs((sx + 0.5) - px) <= 0.72 : Math.abs((sz + 0.5) - pz) <= 0.72)) {
+          if (cornerCount >= 2 || nextDistToWall <= curDistToWall + 0.05 || (Math.abs(ox) > 0 && Math.abs(oz) === 0 ? Math.abs((sx + 0.5) - px) <= 0.72 : (Math.abs(oz) > 0 && Math.abs(ox) === 0 ? Math.abs((sz + 0.5) - pz) <= 0.72 : false))) {
             return true
           }
         }
@@ -227,7 +229,8 @@ class FallGuard {
       const px = x + dx * s; const pz = z + dz * s
       const hz = this.hazardAt(px, y, pz, maxDrop)
       if (hz) {
-        if (hz === 'pit' && aabbSupported(px, pz)) continue
+        const lavaAtFeet = this.world.blockAt(new Vec3(Math.floor(px), Math.floor(y + 0.01), Math.floor(pz)))?.name === 'lava'
+        if (!lavaAtFeet && aabbSupported(px, pz)) continue
         return { kind: hz, x: Math.floor(px), z: Math.floor(pz), dist: s }
       }
       if (maxDrop <= 1 && !this.floorWithin(px, y, pz, maxDrop)) {
@@ -263,16 +266,24 @@ class FallGuard {
   // Is cell (hx, hz) part of the bot's active planned pathfinder/human route (e.g. an intentional 1-3 block step-down or 1-block parkour hop)?
   isPlannedStep (hx, hz, fy) {
     try {
-      if (this.holeKind(hx, hz, fy) === 'lava') return false
+      const lavaAtFeet = this.world.blockAt(new Vec3(hx, fy, hz))?.name === 'lava'
+      if (lavaAtFeet) return false
       const route = this.navigation?.human?.route
       if (Array.isArray(route) && route.length) {
+        const curPos = this.bot?.entity?.position
         for (let i = 0; i < route.length; i++) {
           const wp = route[i]
+          const prev = i > 0 ? route[i - 1] : curPos
+          if (prev && Math.abs(Math.floor(wp.x) - Math.floor(prev.x)) === 1 && Math.abs(Math.floor(wp.z) - Math.floor(prev.z)) === 1 && Math.abs(wp.y - prev.y) <= 0.65 && this.floorWithin(wp.x, wp.y, wp.z, 0)) {
+            if ((hx === Math.floor(prev.x) && hz === Math.floor(wp.z)) || (hx === Math.floor(wp.x) && hz === Math.floor(prev.z))) {
+              return true
+            }
+          }
+          if (this.holeKind(hx, hz, fy) === 'lava') continue
           if (Math.abs(Math.floor(wp.x) - hx) <= 2 && Math.abs(Math.floor(wp.z) - hz) <= 2 && fy - wp.y <= 3.2 && fy - wp.y >= -1.5 && this.floorWithin(wp.x, wp.y, wp.z, 0)) {
             return true
           }
-          if (i > 0) {
-            const prev = route[i - 1]
+          if (prev) {
             const segLen = Math.hypot(wp.x - prev.x, wp.z - prev.z)
             if (segLen >= 1.8 && segLen <= 4.2 && Math.abs(wp.y - prev.y) <= 1.5 && this.floorWithin(wp.x, wp.y, wp.z, 0)) {
               const midX = (prev.x + wp.x) * 0.5; const midZ = (prev.z + wp.z) * 0.5

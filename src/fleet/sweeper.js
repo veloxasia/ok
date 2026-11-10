@@ -121,11 +121,13 @@ class SweeperEngine {
       if (this.scaffold.created.has(`${p.x + dx},${p.y},${p.z + dz}`)) horizTemp++
     }
     const dy = botPos ? Math.abs(p.y - botPos.y) : 0
-    const deckPenalty = dy > 4.0 ? 280 + dy * 18 : dy * 5
-    const failPenalty = (this.failCounts.get(k) || 0) * 60
+    const deckPenalty = dy > 4.0 ? 360 + dy * 24 : dy * 5
+    const failPenalty = (this.failCounts.get(k) || 0) * 240
     const dist = botPos ? Math.hypot(p.x + 0.5 - botPos.x, p.z + 0.5 - botPos.z) : 0
-    const inReachBonus = (botPos && dist <= 4.5 && dy <= 4.0) ? -420 : (botPos && dy <= 3.0 && dist <= 16.0 ? -180 : 0)
-    return inReachBonus + blocksLookUpStand + obstructsFluid + isFinishedLedge + obstructsTask + criticalAdj - p.y * 2 + horizTemp * 6 + dist * 2 + deckPenalty + failPenalty
+    const inReachBonus = (botPos && dist <= 4.5 && dy <= 4.0) ? -480 : (botPos && dy <= 3.0 && dist <= 16.0 ? -220 : 0)
+    const activeLayerY = (this.planner?.box?.y0 ?? -60) + (this.planner?.getStats?.()?.currentLayer ?? 0)
+    const activeDeckBonus = Math.abs(p.y - activeLayerY) <= 2 ? -250 : 0
+    return inReachBonus + activeDeckBonus + blocksLookUpStand + obstructsFluid + isFinishedLedge + obstructsTask + criticalAdj - p.y * 3 + horizTemp * 6 + dist * 2 + deckPenalty + failPenalty
   }
 
   async tickOnce (finalSweep = true) {
@@ -267,11 +269,12 @@ class SweeperEngine {
     const failAt = this.unreachable.get(k)
     if (failAt) {
       const cooldown = finalSweep
-        ? Math.min(10_000, 2_500 * Math.max(1, fails))
-        : Math.min(20_000, 3_500 * Math.max(1, fails))
+        ? Math.min(12_000, 2_500 * Math.max(1, fails))
+        : (fails >= 2 ? Math.min(90_000, 15_000 * fails) : 6_000)
       if (Date.now() - failAt < cooldown) return false
-      // Cooldown expired: decay failCounts so Sweeper never permanently locks out a temporary block!
-      if (fails >= 3) this.failCounts.set(k, 1)
+    }
+    if (!finalSweep && fails >= 4) {
+      return false
     }
     if (finalSweep && fails >= 8) {
       this.scaffold.created.delete(k)
@@ -595,6 +598,34 @@ class SweeperEngine {
       this.syncTempBlocks(finalSweep)
 
       const e = this.bot.entity.position
+      // If Sweeper has fallen >=4 blocks below the active builder fleet and has no immediate in-reach target within 5 blocks,
+      // follow the builders up to the active deck FIRST before attempting distant targets!
+      if (!finalSweep && this.fleet?.coord?.workers && Date.now() - (this._lastDeckFollowAt || 0) > 6_000) {
+        const builderYs = []
+        let bestWp = null
+        let bestDist = Infinity
+        for (const w of this.fleet.coord.workers.values()) {
+          if (w.id === this.fleet.id || w.role === 'sweeper') continue
+          const wp = this.fleet.coord.position(w)
+          if (wp) {
+            builderYs.push(wp.y)
+            if (wp.y - e.y >= 3.5) {
+              const d = Math.hypot(wp.x - e.x, wp.z - e.z)
+              if (d < bestDist) { bestDist = d; bestWp = wp }
+            }
+          }
+        }
+        const hasNearbyInReach = this.scaffold.getCreated().some(p => Math.abs(p.y - e.y) <= 3.5 && Math.hypot(p.x + 0.5 - e.x, p.z + 0.5 - e.z) <= 5.0 && this.isSafeToBreak(p, false))
+        if (bestWp && !hasNearbyInReach) {
+          this._lastDeckFollowAt = Date.now()
+          this.placer.setPhase('sweeper: moving to active builder deck')
+          const goalStand = new Vec3(Math.floor(bestWp.x) + 0.5, Math.floor(bestWp.y), Math.floor(bestWp.z) + 0.5)
+          await this.placer.brain?.prepare?.(goalStand, { force: true }).catch(() => {})
+          await this.nav.goTo(goalStand, 3.5, 9_000, { human: true, work: true, rescue: true }).catch(() => {})
+          continue
+        }
+      }
+
       const safeTargets = this.scaffold.getCreated()
         .filter(p => this.isSafeToBreak(p, finalSweep))
         .sort((a, b) => this.targetPriority(a, e) - this.targetPriority(b, e))

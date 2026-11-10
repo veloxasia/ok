@@ -127,6 +127,7 @@ function save (body) {
   fs.writeFileSync(configFile, JSON.stringify(next, null, 2) + '\n')
   const chosenDefault = next?.control?.defaultSchematic ? path.basename(String(next.control.defaultSchematic)) : null
   if (chosenDefault) {
+    const safeChosen = chosenDefault.replace(/[^a-zA-Z0-9._-]+/g, '_')
     for (const dir of [stateFolder(), dataDir]) {
       for (const fname of ['fleet-job.json', 'active-job.json', 'last-build.json']) {
         const fp = path.join(dir, fname)
@@ -135,6 +136,13 @@ function save (body) {
           try { fs.rmSync(fp, { force: true }) } catch {}
         }
       }
+      try {
+        for (const f of fs.readdirSync(dir)) {
+          if (/\.(litematic|schem|schematic|nbt)--?\d+--?\d+--?\d+-\d+.*\.json$/i.test(f) && !f.startsWith(chosenDefault + '-') && !f.startsWith(safeChosen + '-')) {
+            fs.rmSync(path.join(dir, f), { force: true })
+          }
+        }
+      } catch {}
     }
   }
 
@@ -199,7 +207,7 @@ function wipeSession () {
   for (const dir of [stateFolder(), dataDir]) {
     try {
       for (const f of fs.readdirSync(dir)) {
-        if (/^(active-job|fleet-job)\.json$|\.litematic-.*\.json$/.test(f)) {
+        if (/^(active-job|fleet-job|last-build)\.json$|\.(litematic|schem|schematic|nbt)-.*\.json$/i.test(f)) {
           fs.rmSync(path.join(dir, f), { force: true })
         }
       }
@@ -405,6 +413,7 @@ function start (port = 0, host = process.env.MHB_GUI_HOST || '0.0.0.0') {
           const curCfg = readJson(configFile, readJson(path.join(root, 'config.example.json'), {}))
           curCfg.control = { ...(curCfg.control || {}), defaultSchematic: rawName }
           fs.writeFileSync(configFile, JSON.stringify(curCfg, null, 2) + '\n')
+          const safeRaw = rawName.replace(/[^a-zA-Z0-9._-]+/g, '_')
           for (const dir of [stateFolder(), dataDir]) {
             for (const fname of ['fleet-job.json', 'active-job.json', 'last-build.json']) {
               const fp = path.join(dir, fname)
@@ -413,6 +422,13 @@ function start (port = 0, host = process.env.MHB_GUI_HOST || '0.0.0.0') {
                 try { fs.rmSync(fp, { force: true }) } catch {}
               }
             }
+            try {
+              for (const f of fs.readdirSync(dir)) {
+                if (/\.(litematic|schem|schematic|nbt)--?\d+--?\d+--?\d+-\d+.*\.json$/i.test(f) && !f.startsWith(rawName + '-') && !f.startsWith(safeRaw + '-')) {
+                  fs.rmSync(path.join(dir, f), { force: true })
+                }
+              }
+            } catch {}
           }
         } catch {}
         pushLog(`[gui] uploaded schematic: ${rawName} (${buf.length} bytes)`)

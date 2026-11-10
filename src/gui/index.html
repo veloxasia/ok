@@ -187,7 +187,7 @@ function fill(){const s=S.settings
  if(prevSchem&&[...sel.options].some(o=>o.value===prevSchem))sel.value=prevSchem
  else if(s.control.defaultSchematic&&[...sel.options].some(o=>o.value===s.control.defaultSchematic))sel.value=s.control.defaultSchematic
  accounts=S.accounts.map(a=>({...a}));setMode(m,true);updateStats(S.dataStats,S.system)}
-$('schem').onchange=()=>{if(S?.settings?.control)S.settings.control.defaultSchematic=$('schem').value}
+$('schem').onchange=()=>{if(S?.settings?.control)S.settings.control.defaultSchematic=$('schem').value;if(S?.saved&&S.saved.file!==$('schem').value){S.saved=null;showSaved(null,false)}}
 const list=v=>v.split(',').map(x=>x.trim()).filter(Boolean)
 function collect(){stash();const d=mode==='donut',h=prof[mode]
  return{mode,settings:{serverProfiles:prof,server:{host:h.host,port:h.port,version:$('version').value.trim(),autoReconnect:$('autoReconnect').checked},

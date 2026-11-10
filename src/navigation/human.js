@@ -306,19 +306,23 @@ function createHuman (bot, opts = {}) {
       const t = s / steps
       const cx = a.x + d.x * t
       const cz = a.z + d.z * t
-      const latR = s <= 1 ? 0.16 : 0.25
-      let anyFloor = false
+      const latR = s <= 1 ? 0.16 : 0.26
+      let centerFloor = false
+      let cornerFloors = 0
       for (const [ox, oz] of [[0, 0], [nx * -latR, nz * -latR], [nx * latR, nz * latR], [-latR, -latR], [latR, -latR], [-latR, latR], [latR, latR]]) {
         const isCenter = ox === 0 && oz === 0
         const p = new Vec3(cx + ox, a.y, cz + oz)
         const feetB = bot.blockAt(p)
         const onBotSlab = (isBottomSlabBlock(feetB) || isLowFloorBlock(feetB) || isStairBlock(feetB)) && !inPit(p)
         const floorOk = onBotSlab || (solid(p.offset(0, -1, 0)) && !inPit(p))
-        if (floorOk) anyFloor = true
-        if (s >= 1 && !floorOk) return false
-        if (!passable(p, true, s >= 1) || !passable(p.offset(0, 1, 0), false, false)) return false
+        if (floorOk) {
+          if (isCenter) centerFloor = true
+          else cornerFloors++
+        }
+        if (!passable(p, true, false) || !passable(p.offset(0, 1, 0), false, false)) return false
       }
-      if (!anyFloor) return false
+      if (!centerFloor && cornerFloors < 2) return false
+      if (s >= 1 && !centerFloor && cornerFloors < 2) return false
     }
     return true
   }
@@ -337,9 +341,11 @@ function createHuman (bot, opts = {}) {
       const y = Math.floor(a.y + (b.y - a.y) * t + 0.01)
       const cx = a.x + d.x * t
       const cz = a.z + d.z * t
-      const latR = s <= 2 ? 0.16 : 0.25
+      const latR = s <= 2 ? 0.16 : 0.26
       let centerFloorOk = false
       let anyCornerFloorOk = false
+      let cornerFloorCount = 0
+      let centerHitTrapOrPit = false
       for (const [ox, oz] of [[0, 0], [nx * -latR, nz * -latR], [nx * latR, nz * latR], [-latR, -latR], [latR, -latR], [-latR, latR], [latR, latR]]) {
         const isCenter = ox === 0 && oz === 0
         const x = cx + ox
@@ -351,24 +357,27 @@ function createHuman (bot, opts = {}) {
         if (bl0 && ((bl0.boundingBox === 'block' && !doorLike(bl0) && !botSlab0) || /^(water|lava|fire|soul_fire)$/.test(bl0.name))) return false
         if (bl1 && ((bl1.boundingBox === 'block' && !doorLike(bl1) && !stairStep1) || /^(water|lava|fire|soul_fire)$/.test(bl1.name))) return false
         if (allowGapHop) continue
-        if (isCenter && s > 2 && inPit(new Vec3(x, y, z))) return false
+        if (isCenter && s > 2 && inPit(new Vec3(x, y, z))) centerHitTrapOrPit = true
         let hasFloor = botSlab0 && !inPit(new Vec3(x, y, z))
         for (let dy = 1; !hasFloor && dy <= maxDropAllowed; dy++) {
           const fl = bot.blockAt(new Vec3(x, y - dy, z))
           if (fl && trapFloor(fl)) {
-            if (isCenter) return false
+            if (isCenter) centerHitTrapOrPit = true
             break
           }
           if (fl && (fl.boundingBox === 'block' || /ladder|vine/.test(fl.name))) { hasFloor = true; break }
-          if (isCenter && s > 2 && inPit(new Vec3(x, y - dy, z))) return false
+          if (isCenter && s > 2 && inPit(new Vec3(x, y - dy, z))) centerHitTrapOrPit = true
         }
         if (hasFloor) {
           anyCornerFloorOk = true
           if (isCenter) centerFloorOk = true
+          else cornerFloorCount++
         }
       }
       if (!allowGapHop) {
-        if (!centerFloorOk || !anyCornerFloorOk) return false
+        const aabbDiagonalBridgeOk = cornerFloorCount >= 2
+        if (centerHitTrapOrPit && !aabbDiagonalBridgeOk) return false
+        if ((!centerFloorOk || !anyCornerFloorOk) && !aabbDiagonalBridgeOk) return false
       }
     }
     return true
@@ -678,6 +687,7 @@ function createHuman (bot, opts = {}) {
     const nextUp = Boolean(curWp && curWp.y > pos.y + 0.45 && wpDist < 1.55)
     const fyNow = Math.floor(pos.y + 0.01)
     const isParkourHop = false
+    const isDiagStep = Boolean(curWp && Math.abs(Math.floor(curWp.x) - Math.floor(pos.x)) === 1 && Math.abs(Math.floor(curWp.z) - Math.floor(pos.z)) === 1 && Math.abs(curWp.y - pos.y) < 0.55 && wpDist > 0.28)
     const spatial = spatialNow
     const isNarrow = spatial.mode === 'narrow'
     const checkRayDrop = (ux, uz, maxD) => {
@@ -713,7 +723,7 @@ function createHuman (bot, opts = {}) {
       (belowFeetBlock0 && /^(ladder|vine|scaffolding)$/.test(belowFeetBlock0.name || ''))
     )
     const dropAhead = () => {
-      if (inWater || onClimbable || nextUp || isParkourHop) return false
+      if (inWater || onClimbable || nextUp || isParkourHop || isDiagStep) return false
       const lookDist = Math.min(0.85, stopDist + 0.25)
       if (checkRayDrop(-Math.sin(wantYaw), -Math.cos(wantYaw), lookDist)) return true
       if (speed > 0.06) {
@@ -738,15 +748,16 @@ function createHuman (bot, opts = {}) {
     }
 
     const onStairsNow = Boolean(isStairBlock(feetBlock0) || isStairBlock(belowFeetBlock0))
-    // Engage sneak during walking when overhanging or on a narrow 1-block strip near a real drop (>=2 blocks)
-    const needSneakGuard = !inWater && !onClimbable && !onStairsNow && bot.entity.onGround && !nextUp &&
+    // Engage sneak during walking when overhanging or on a narrow 1-block strip near a real drop (>=2 blocks),
+    // EXCEPT when stepping diagonally across a 1-block corner (where Vanilla Minecraft's sneak edge-clamp locks both dx=0 and dz=0 at the corner)!
+    const needSneakGuard = !inWater && !onClimbable && !onStairsNow && !isDiagStep && bot.entity.onGround && !nextUp &&
       Boolean((spatial.overhanging || (isNarrow && (nearEdge || aerr > 12 * DEG || spatial.safeNeighbors <= 2))) && bot.builder?.fallGuard?.hazardAt?.(pos.x, pos.y, pos.z, 2))
     if (needSneakGuard) {
       bot.setControlState('sneak', true)
       w.sneakGuard = true
       left = false
       right = false
-    } else if (w.sneakGuard) {
+    } else if (w.sneakGuard || (isDiagStep && bot.getControlState('sneak'))) {
       bot.setControlState('sneak', false)
       w.sneakGuard = false
     }
@@ -777,6 +788,7 @@ function createHuman (bot, opts = {}) {
       const tgt = w.route[Math.min(w.idx, w.route.length - 1)]
       if (tgt && Math.abs(tgt.y - pos.y) < 0.6 && horiz(tgt.minus(pos)) < 4 && !clearLine(pos, tgt, isParkourHop)) {
         markBad(pos, tgt)
+        if (++w.replans > 2) { failWalk(w, new Error('stuck: route blocked')); return }
         startReplan(w, 'route blocked by a new block')
         return
       }
@@ -871,6 +883,11 @@ function createHuman (bot, opts = {}) {
 
   function startReplan (w, why) {
     if (w.replanning) return
+    w.replanTotal = (w.replanTotal || 0) + 1
+    if (w.replanTotal > 3) {
+      failWalk(w, new Error(`stuck (${why})`))
+      return
+    }
     w.replanning = true
     bot.setControlState('forward', false)
     bot.setControlState('sprint', false)

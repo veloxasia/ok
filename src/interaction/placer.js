@@ -566,7 +566,8 @@ class Placer {
     return require('../recovery/fall-guard').withHold(bot, async () => {
     const p = bot.entity.position
     const off = Math.hypot(p.x - cand.stand.x, p.z - cand.stand.z)
-    if (off < 0.05 || off > 1.35 || Math.abs(p.y - cand.stand.y) > 0.55) return
+    const hasPoseAlready = !target || !spec || Boolean(this.aim.fromPose(target, spec, null, opts || {}))
+    if ((off < 0.05 && hasPoseAlready) || (off < 0.015) || off > 1.35 || Math.abs(p.y - cand.stand.y) > 0.55) return
     bot.setControlState('sneak', true)
     try {
       for (let i = 0; i < 28; i++) {
@@ -888,7 +889,7 @@ class Placer {
   fluidBeside (p, final) {
     const pk = `${p.x},${p.y},${p.z}`
     const pIsFluidCell = Boolean(this.planner?.fluidCells?.has(pk))
-    for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]]) {
+    for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0], [1, 1, 0], [-1, 1, 0], [0, 1, 1], [0, 1, -1]]) {
       const b = this.world.blockAt({ x: p.x + dx, y: p.y + dy, z: p.z + dz })
       if (!b) continue
       if (b.name === 'lava') return true
@@ -2095,9 +2096,16 @@ class Placer {
     const unsafe = this.tntUnsafeReason(task)
     if (unsafe) throw new BuildError('UNSAFE', `not placing TNT at ${key(task.world)}: ${unsafe}`)
     await this.clearCell(task)
-    if (task.kind === 'block' && task.info?.specs?.[0]?.look !== 'up') {
-      const checkCells = [task.world.offset(0, 1, 0)]
-      if (task.order >= 88000 || /^(piston|sticky_piston|tnt|observer|slime_block|redstone_torch|redstone_wall_torch)$/.test(task.name || '')) {
+    if (task.kind === 'block') {
+      const isLookUpHere = task.info?.specs?.[0]?.look === 'up'
+      const checkCells = isLookUpHere ? [] : [task.world.offset(0, 1, 0)]
+      if (isLookUpHere) {
+        // Clear any leftover temporary stone blocks in the look-up stand shaft at y (dx, 0, dz) or y-1 (dx, -1, dz),
+        // while preserving the look-up standing floor ledge L at y-2 (dx, -2, dz)!
+        for (const [dx, dy, dz] of [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [1, -1, 0], [-1, -1, 0], [0, -1, 1], [0, -1, -1]]) {
+          checkCells.push(task.world.offset(dx, dy, dz))
+        }
+      } else if (task.order >= 88000 || /^(piston|sticky_piston|tnt|observer|slime_block|redstone_torch|redstone_wall_torch)$/.test(task.name || '')) {
         for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [1, 1, 0], [-1, 1, 0], [0, 1, 1], [0, 1, -1]]) {
           checkCells.push(task.world.offset(dx, dy, dz))
         }
@@ -2252,6 +2260,24 @@ class Placer {
                 }
               }
             }
+            // If the bot placed a look === "up" block while standing in a 4-walled 1x1 shaft at y <= task.world.y - 1,
+            // jump-pillar 1 temporary block under its feet to reach y = task.world.y, hop onto a permanent rim block (y = task.world.y + 1),
+            // and sweep both the temporary step and the look-up ledge!
+            const meCheck = this.bot?.entity?.position
+            if (isLookUpTask && meCheck && Math.floor(meCheck.y + 0.05) <= task.world.y - 1) {
+              const fcShaft = new Vec3(Math.floor(meCheck.x), Math.floor(meCheck.y + 0.05), Math.floor(meCheck.z))
+              let walledSides = 0
+              for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                const wb = this.world.blockAt(fcShaft.offset(dx, 1, dz))
+                if (wb && wb.boundingBox === 'block') walledSides++
+              }
+              if (walledSides >= 4 && isBodyFree(this.world.blockAt(fcShaft.offset(0, 2, 0)))) {
+                try {
+                  await this.scaffold.tower({ floor: fcShaft, height: 1, isAccessStep: true }, new Vec3(fcShaft.x + 0.5, fcShaft.y + 1, fcShaft.z + 0.5))
+                  if (!supportsToSweep.some(x => x.equals(fcShaft))) supportsToSweep.push(fcShaft)
+                } catch {}
+              }
+            }
             if (supportsToSweep.length) {
               // If the bot is currently standing on one of the temporary ledges in supportsToSweep, step back up onto a permanent rim block first!
               const meNow = this.bot?.entity?.position
@@ -2346,7 +2372,7 @@ class Placer {
     throw new BuildError('WRONG_STATE', `${task.name} at ${key(task.world)} never reached the wanted state`)
   }
 
-  async clearBody (target) {
+  async clearBody (target, spec = null) {
     const overlap = e => {
       const p = e?.position
       return p && Math.abs(p.x - (target.x + 0.5)) < 0.8 && Math.abs(p.z - (target.z + 0.5)) < 0.8 && p.y < target.y + 1 && p.y + 1.8 > target.y
@@ -2361,6 +2387,14 @@ class Placer {
       if (self) {
         const fy = Math.floor(me.position.y + 0.01)
         const feet = me.position.floored()
+        // When standing in an adjacent cell (e.g. a look-up ledge at y = target.y - 1) and slightly clipping target's 0.8 AABB,
+        // micro-slide away within the current cell without changing Y or losing upward pitch!
+        if ((feet.x !== target.x || feet.z !== target.z) && typeof this.scaffold?.slide === 'function') {
+          const awayX = feet.x + 0.5 + Math.sign(feet.x - target.x) * 0.24
+          const awayZ = feet.z + 0.5 + Math.sign(feet.z - target.z) * 0.24
+          await this.scaffold.slide(new Vec3(awayX, me.position.y, awayZ), true).catch(() => {})
+          if (!overlap(this.bot.entity)) return
+        }
         const baseYaw = Math.atan2(-(me.position.x - (target.x + 0.5)), -(me.position.z - (target.z + 0.5)))
         let bestBack = null
         let fallbackYaw = null
@@ -2410,20 +2444,23 @@ class Placer {
           if (!overlap(this.bot.entity)) return
         }
         if (fallbackYaw === null) {
-          for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-            const b0 = this.world.blockAt(new Vec3(feet.x + dx, fy, feet.z + dz))
-            const b1 = this.world.blockAt(new Vec3(feet.x + dx, fy + 1, feet.z + dz))
-            const b2 = this.world.blockAt(new Vec3(feet.x + dx, fy + 2, feet.z + dz))
-            if (isFullTop(b0) && isBodyFree(b1) && isBodyFree(b2) && typeof this.scaffold?._stepOntoTop === 'function') {
-              const steppedOut = await this.scaffold._stepOntoTop(new Vec3(feet.x + dx + 0.5, fy + 1, feet.z + dz + 0.5), 1600).catch(() => false)
-              if (steppedOut && !overlap(this.bot.entity)) return
+          if (spec?.look !== 'up') {
+            for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+              if (feet.x + dx === target.x && feet.z + dz === target.z) continue
+              const b0 = this.world.blockAt(new Vec3(feet.x + dx, fy, feet.z + dz))
+              const b1 = this.world.blockAt(new Vec3(feet.x + dx, fy + 1, feet.z + dz))
+              const b2 = this.world.blockAt(new Vec3(feet.x + dx, fy + 2, feet.z + dz))
+              if (isFullTop(b0) && isBodyFree(b1) && isBodyFree(b2) && typeof this.scaffold?._stepOntoTop === 'function') {
+                const steppedOut = await this.scaffold._stepOntoTop(new Vec3(feet.x + dx + 0.5, fy + 1, feet.z + dz + 0.5), 1600).catch(() => false)
+                if (steppedOut && !overlap(this.bot.entity)) return
+              }
             }
-          }
-          if (isBodyFree(this.world.blockAt(feet.offset(0, 2, 0)))) {
-            this.bot.setControlState('jump', true)
-            await sleep(220)
-            this.bot.setControlState('jump', false)
-            if (!overlap(this.bot.entity)) return
+            if (isBodyFree(this.world.blockAt(feet.offset(0, 2, 0)))) {
+              this.bot.setControlState('jump', true)
+              await sleep(220)
+              this.bot.setControlState('jump', false)
+              if (!overlap(this.bot.entity)) return
+            }
           }
           throw new BuildError('NO_ACCESS', `standing inside target cell ${key(target)} with holes around`)
         }
@@ -2501,7 +2538,7 @@ class Placer {
       this.check()
       const refBlock = this.world.blockAt(aimed.pose.ref)
       if (!refBlock || isAirLike(refBlock)) throw new BuildError('REF_GONE', `reference block vanished at ${key(aimed.pose.ref)}`)
-      await this.clearBody(target)
+      await this.clearBody(target, spec)
       this.setPhase('rate gate')
       await this.rateGate()
       if (this.bot.entity.isInWater || !this.aim.validateView(spec, aimed.pose.faceOpt, aimed.pose.ref, aimed.pose.faceName)) {

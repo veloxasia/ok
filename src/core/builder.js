@@ -839,10 +839,10 @@ class ConstructionEngine {
       await this.escapeIfInTrenchOrPit().catch(() => {})
       if (!this.joinedChecked && this.originVec) { this.joinedChecked = true; await this.teleporter?.returnToWork(this.originVec, 'joined far from the site').catch(() => {}) }
       const pos = this.bot.entity.position
-      if (this.planner.quarantined?.size > 0 && Date.now() - (this._lastQuarantineCheckAt || 0) > 20_000) {
+      if (this.planner.quarantined?.size > 0 && Date.now() - (this._lastQuarantineCheckAt || 0) > 45_000) {
         this._lastQuarantineCheckAt = Date.now()
         const revivedQ = this.planner.revive({ includeQuarantined: false, includeExpiredQuarantined: true, onlyQuarantined: true })
-        if (revivedQ > 0) this.logger.info(`QUARANTINE-REVIVE: reopened ${revivedQ} lower-layer straggler task(s) after cooldown`)
+        if (revivedQ > 0) this.logger.info(`QUARANTINE-REVIVE: reopened ${revivedQ} lower-layer straggler task(s) after neighbor change`)
       }
       let task = this.planner.next(pos)
       if (!task) task = this.planner.nextCandidate(pos)

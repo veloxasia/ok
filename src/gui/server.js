@@ -125,6 +125,18 @@ function save (body) {
   for (const k of EDITABLE) if (body.settings?.[k] && typeof body.settings[k] === 'object') next[k] = deepMerge(next[k] || {}, body.settings[k])
   if (body.mode === 'test' || body.mode === 'donut') next.mode = body.mode
   fs.writeFileSync(configFile, JSON.stringify(next, null, 2) + '\n')
+  const chosenDefault = next?.control?.defaultSchematic ? path.basename(String(next.control.defaultSchematic)) : null
+  if (chosenDefault) {
+    for (const dir of [stateFolder(), dataDir]) {
+      for (const fname of ['fleet-job.json', 'active-job.json', 'last-build.json']) {
+        const fp = path.join(dir, fname)
+        const j = readJson(fp, null)
+        if (j && j.file && path.basename(String(j.file)) !== chosenDefault) {
+          try { fs.rmSync(fp, { force: true }) } catch {}
+        }
+      }
+    }
+  }
 
   const old = readJson(accountsFile, { accounts: [] })
   const oldList = Array.isArray(old) ? old : old.accounts || []
@@ -143,12 +155,16 @@ function save (body) {
 
 // the saved job the bots could continue, if any
 function savedJob () {
+  const cfg = loadConfig(root)
+  const preferred = cfg?.control?.defaultSchematic ? path.basename(String(cfg.control.defaultSchematic)) : null
   for (const dir of [stateFolder(), dataDir]) {
     for (const fname of ['fleet-job.json', 'active-job.json', 'last-build.json']) {
       const j = readJson(path.join(dir, fname), null)
       if (j && j.file && j.origin) {
+        const base = path.basename(j.file)
+        if (preferred && base !== preferred) continue
         return {
-          file: path.basename(j.file),
+          file: base,
           origin: j.origin,
           rotation: j.rotation || 0,
           startLayer: j.startLayer ?? null
@@ -164,6 +180,7 @@ function savedJob () {
         if (m) {
           const j = readJson(path.join(dir, f), null)
           const schemFile = j?.schematic ? path.basename(j.schematic) : m[1].replace(/_/g, ' ')
+          if (preferred && schemFile !== preferred) continue
           return {
             file: schemFile,
             origin: { x: Number(m[2]), y: Number(m[3]), z: Number(m[4]) },
@@ -384,6 +401,20 @@ function start (port = 0, host = process.env.MHB_GUI_HOST || '0.0.0.0') {
         const schemDir = path.resolve(root, cfg.paths.schematicsDir || './schematics')
         fs.mkdirSync(schemDir, { recursive: true })
         fs.writeFileSync(path.join(schemDir, rawName), buf)
+        try {
+          const curCfg = readJson(configFile, readJson(path.join(root, 'config.example.json'), {}))
+          curCfg.control = { ...(curCfg.control || {}), defaultSchematic: rawName }
+          fs.writeFileSync(configFile, JSON.stringify(curCfg, null, 2) + '\n')
+          for (const dir of [stateFolder(), dataDir]) {
+            for (const fname of ['fleet-job.json', 'active-job.json', 'last-build.json']) {
+              const fp = path.join(dir, fname)
+              const j = readJson(fp, null)
+              if (j && j.file && path.basename(String(j.file)) !== rawName) {
+                try { fs.rmSync(fp, { force: true }) } catch {}
+              }
+            }
+          }
+        } catch {}
         pushLog(`[gui] uploaded schematic: ${rawName} (${buf.length} bytes)`)
         return json(200, { ok: true, name: rawName, schematics: schematics(cfg.paths.schematicsDir) })
       }

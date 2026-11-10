@@ -253,7 +253,7 @@ function hitSamples (refPos, faceName, faceOpt, box = [0, 0, 0, 1, 1, 1], fine =
   if (vMin > vMax) vMin = vMax = (y0 + y1) / 2
   if (wMin > wMax) wMin = wMax = (z0 + z1) / 2
 
-  const ts = fine ? [0.5, 0.3, 0.7, 0.15, 0.85, 0.05, 0.95] : [0.5, 0.25, 0.75, 0.82, 0.18]
+  const ts = fine ? [0.5, 0.3, 0.7, 0.15, 0.85, 0.05, 0.93, 0.95] : [0.5, 0.25, 0.75, 0.82, 0.18]
   const pick = (lo, hi) => lo === hi ? [lo] : ts.map(t => lo + (hi - lo) * t)
   const us = pick(uMin, uMax)
   const vs = pick(vMin, vMax)
@@ -517,6 +517,8 @@ class AimSolver {
             hasAnchor = true
             for (const dy of [0, 1, -1, 2, -2]) {
               const adjStand = cell.offset(dx, dy, dz)
+              if (target && adjStand.equals(target)) continue
+              if (this.isPending && this.isPending(adjStand)) continue
               if (this.standOk(adjStand, cache) && (botY == null || Math.abs(botY - adjStand.y) <= 3.5)) {
                 hasWalkAdjacent = true
                 if (!bestWalkStand) bestWalkStand = adjStand
@@ -778,7 +780,7 @@ class AimSolver {
             for (const [sx, sz] of shifts) {
               if (sx !== 0) { const dxS = Math.sign(sx); if (this.world.blockAt(S.offset(dxS, -1, 0))?.name === 'lava' || this.world.blockAt(S.offset(dxS, 0, 0))?.name === 'lava') continue }
               if (sz !== 0) { const dzS = Math.sign(sz); if (this.world.blockAt(S.offset(0, -1, dzS))?.name === 'lava' || this.world.blockAt(S.offset(0, 0, dzS))?.name === 'lava') continue }
-              if (!self && Math.abs(S.x + 0.5 + sx - (target.x + 0.5)) < 0.805 && Math.abs(S.z + 0.5 + sz - (target.z + 0.5)) < 0.805 && standY < target.y + 1 && standY + 1.8 > target.y) continue
+              if (!self && Math.abs(S.x + 0.5 + sx - (target.x + 0.5)) < 0.825 && Math.abs(S.z + 0.5 + sz - (target.z + 0.5)) < 0.825 && standY < target.y + 1 && standY + 1.8 > target.y) continue
               const bigEdge = Math.abs(sx) > 0.24 || Math.abs(sz) > 0.24
               const edge = bigEdge
               for (const sneak of (needSneak || adjLavaDrop || bigEdge || (edge && opts.fixedStand) ? [true] : [false, true])) {
@@ -924,7 +926,7 @@ class AimSolver {
       ? new Vec3(supNow.block.position.x, fcNow.y, supNow.block.position.z)
       : fcVec
     if (this.isHazard(supCell) && (this.isHazard(flNow) || this.isHazard(fcVec))) return null
-    if (!self && Math.abs(e.position.x - (target.x + 0.5)) < 0.805 && Math.abs(e.position.z - (target.z + 0.5)) < 0.805 && e.position.y < target.y + 1 && e.position.y + 1.8 > target.y) {
+    if (!self && Math.abs(e.position.x - (target.x + 0.5)) < 0.795 && Math.abs(e.position.z - (target.z + 0.5)) < 0.795 && e.position.y < target.y + 1 && e.position.y + 1.8 > target.y) {
       return null
     }
     const curSneak = Boolean(this.bot.getControlState?.('sneak'))

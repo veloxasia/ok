@@ -183,9 +183,11 @@ function fill(){const s=S.settings
  $('stacks').value=s.shop.stacksPerVisit;const tools=(s.materials.toolItems||[]).join(', ');$('tools').value=tools;$('toolsT').value=tools
  $('food').value=$('foodT').value=s.materials.foodItem||'';$('allowPearls').checked=$('allowPearlsT').checked=s.human.allowPearls!==false
  $('tpHomes').checked=s.teleport.homes!==false;$('tpTpa').checked=s.teleport.tpa!==false
- const sel=$('schem');sel.innerHTML='';S.schematics.forEach(f=>{const o=document.createElement('option');o.textContent=f;sel.appendChild(o)})
- if(s.control.defaultSchematic)sel.value=s.control.defaultSchematic
+ const sel=$('schem');const prevSchem=sel.value;sel.innerHTML='';S.schematics.forEach(f=>{const o=document.createElement('option');o.textContent=f;sel.appendChild(o)})
+ if(prevSchem&&[...sel.options].some(o=>o.value===prevSchem))sel.value=prevSchem
+ else if(s.control.defaultSchematic&&[...sel.options].some(o=>o.value===s.control.defaultSchematic))sel.value=s.control.defaultSchematic
  accounts=S.accounts.map(a=>({...a}));setMode(m,true);updateStats(S.dataStats,S.system)}
+$('schem').onchange=()=>{if(S?.settings?.control)S.settings.control.defaultSchematic=$('schem').value}
 const list=v=>v.split(',').map(x=>x.trim()).filter(Boolean)
 function collect(){stash();const d=mode==='donut',h=prof[mode]
  return{mode,settings:{serverProfiles:prof,server:{host:h.host,port:h.port,version:$('version').value.trim(),autoReconnect:$('autoReconnect').checked},
@@ -195,16 +197,16 @@ function collect(){stash();const d=mode==='donut',h=prof[mode]
   teleport:{homes:$('tpHomes').checked,tpa:$('tpTpa').checked},safety:{minimumHealth:Number($('minHealth').value)||8},
   control:{defaultSchematic:$('schem').value,allowedUsers:list($('myName').value),chatCommands:list($('myName').value).length>0}},
   accounts:accounts.map(a=>({enabled:a.enabled,mode:a.mode,role:a.role||'auto',username:a.username,accessToken:a.mode==='session'?a.accessToken:undefined,password:a.mode==='offline'?a.password:undefined}))}}
-function showSaved(j){const b=$('startBots');b.title=j?`Saved: ${j.file} at ${j.origin?.x}, ${j.origin?.y}, ${j.origin?.z}`:'No saved build yet: starts the bots and waits for Start build';$('savedInfo').textContent=j?`Last session: ${j.file} at ${j.origin?.x}, ${j.origin?.y}, ${j.origin?.z}${j.startLayer!=null?` (continue from layer ${j.startLayer})`:''}`:'No saved session.'
+function showSaved(j,allowSelectSchem=false){const b=$('startBots');b.title=j?`Saved: ${j.file} at ${j.origin?.x}, ${j.origin?.y}, ${j.origin?.z}`:'No saved build yet: starts the bots and waits for Start build';$('savedInfo').textContent=j?`Last session: ${j.file} at ${j.origin?.x}, ${j.origin?.y}, ${j.origin?.z}${j.startLayer!=null?` (continue from layer ${j.startLayer})`:''}`:'No saved session.'
  if(j&&j.origin){
   if($('ox').value===''&&j.origin.x!=null)$('ox').value=j.origin.x
   if($('oy').value===''&&j.origin.y!=null)$('oy').value=j.origin.y
   if($('oz').value===''&&j.origin.z!=null)$('oz').value=j.origin.z
   if(j.rotation!=null)$('rot').value=String(j.rotation||0)
   if($('startLayer').value===''&&j.startLayer!=null)$('startLayer').value=j.startLayer
-  if(j.file&&[...$('schem').options].some(o=>o.value===j.file))$('schem').value=j.file
+  if(allowSelectSchem&&!S?.settings?.control?.defaultSchematic&&j.file&&[...$('schem').options].some(o=>o.value===j.file))$('schem').value=j.file
  }}
-async function save(){try{if(!$('host').value.trim())throw new Error('Enter the server address first');await api('/api/save',collect());S=await api('/api/state');fill();showSaved(S.saved);msg('Saved');return true}catch(e){msg(e.message,1);return false}}
+async function save(){try{if(!$('host').value.trim())throw new Error('Enter the server address first');const chosenSchem=$('schem').value;await api('/api/save',collect());S=await api('/api/state');fill();if(chosenSchem&&[...$('schem').options].some(o=>o.value===chosenSchem))$('schem').value=chosenSchem;showSaved(S.saved,false);msg('Saved');return true}catch(e){msg(e.message,1);return false}}
 $('save').onclick=save
 function setRunning(r){running=r;$('dot').className='dot'+(r?' on':'');$('runtxt').textContent=r?'Bots running':'Bots stopped';for(const id of ['startBots','startFresh'])$(id).style.display=r?'none':'';$('stopBots').style.display=r?'':'none'
  for(const id of ['build','continueBuild','pause','resume','stopBuild'])$(id).disabled=!r}
@@ -259,11 +261,13 @@ $('schemUpload').onchange=async e=>{
   const sel=$('schem');sel.innerHTML=''
   j.schematics.forEach(f=>{const o=document.createElement('option');o.textContent=f;sel.appendChild(o)})
   sel.value=j.name
+  if(S?.settings?.control)S.settings.control.defaultSchematic=j.name
+  if(S?.saved&&S.saved.file!==j.name){S.saved=null;showSaved(null,false)}
   msg('Uploaded '+j.name)
  }catch(err){msg('Upload failed: '+err.message,1)}
  e.target.value=''
 }
 
 async function poll(){try{const j=await api('/api/logs?since='+next);next=j.next;setRunning(Boolean(j.running));if(j.dataStats)updateStats(j.dataStats);if(j.lines.length){const el=$('log');const atEnd=el.scrollTop+el.clientHeight>=el.scrollHeight-20;el.textContent+=j.lines.join('\n')+'\n';if(el.textContent.length>200000)el.textContent=el.textContent.slice(-120000);if(atEnd)el.scrollTop=el.scrollHeight}}catch{}setTimeout(poll,1200)}
-api('/api/state').then(s=>{S=s;fill();setRunning(s.running);showSaved(s.saved);poll()}).catch(e=>msg(e.message,1))
+api('/api/state').then(s=>{S=s;fill();setRunning(s.running);showSaved(s.saved,true);poll()}).catch(e=>msg(e.message,1))
 </script></body></html>

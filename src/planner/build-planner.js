@@ -549,11 +549,22 @@ class BuildPlanner {
         }
         if (nearTrapdoor) return +(layer * 4 + 0.15).toFixed(2)
       }
-      if (layer >= 9) {
+      if (layer >= 9 && info.specs?.[0]?.look !== "up") {
         const below = this.schematic.getBlock(new Vec3(local.x, local.y - 1, local.z))
         const bn = below?.name ? below.name.replace(/^minecraft:/, "") : ""
-        if (!bn || /^(air|cave_air|void_air|water|lava)$/.test(bn)) {
+        if (/^(water|lava)$/.test(bn)) {
           return +(layer * 4 + 0.08).toFixed(2)
+        }
+        if (!bn || /^(air|cave_air|void_air)$/.test(bn)) {
+          let adjLookUp = false
+          for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const nb = this.schematic.getBlock(new Vec3(local.x + dx, local.y, local.z + dz))
+            if (nb && /^(piston|sticky_piston|dropper|dispenser|command_block)$/.test((nb.name || "").replace(/^minecraft:/, "")) && nb.properties?.facing === "down") {
+              adjLookUp = true
+              break
+            }
+          }
+          return +(layer * 4 + (adjLookUp ? 0.22 : 0.08)).toFixed(2)
         }
       }
     }
@@ -2397,7 +2408,16 @@ class BuildPlanner {
   hasDirectlyUnfinishedBelow (task) {
     if (task?.kind === "fluid" && task.world && this.tasks) {
       const bf = this.tasks.get(`${task.world.x},${task.world.y - 1},${task.world.z}`)
-      if (bf && (bf.kind === "fluid" || bf.kind === "block") && bf.status !== "completed" && bf.status !== "blocked") return true
+      if (bf && (bf.kind === "fluid" || bf.kind === "block") && bf.status !== "completed" && !bf._skippedByContinue) {
+        if (bf.status === "blocked") {
+          const now = Date.now()
+          if (now - (bf._lastReopenFromAbove || 0) > 12_000) {
+            bf._lastReopenFromAbove = now
+            this.reopenTask(bf.key, this.fleet?.index, { forceReset: true })
+          }
+        }
+        return true
+      }
       return false
     }
     if (!task?.world || !this.tasks || task.kind !== "block") return false
@@ -3510,8 +3530,10 @@ class BuildPlanner {
       const isQuarantined = Boolean(this.quarantined?.has(t.key))
       if (onlyQuarantined && !isQuarantined) continue
       if (isQuarantined) {
-        const expired = includeExpiredQuarantined && (now - (t.quarantinedAt || 0) >= 30_000)
+        const maskChanged = Boolean(t.world && this.neighborSolidMask(t.world) !== t._quarantineMask)
+        const expired = includeExpiredQuarantined && (now - (t.quarantinedAt || 0) >= 45_000) && maskChanged && (t.quarantineRevives || 0) < 1
         if (!includeQuarantined && !isEndgame && !expired) continue
+        if (isEndgame && !includeQuarantined && (t.quarantineRevives || 0) >= 3) continue
       }
       if (t.status === 'blocked' || t.status === 'deferred' || t.status === 'failed' || (t.anyUntil || 0) > 0) {
         if (t.status === 'blocked') this.blocked.delete(t.key)

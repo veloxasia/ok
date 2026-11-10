@@ -270,7 +270,15 @@ function planEntries (blockAt, R, from, opts = {}) {
       let open = true
       for (let k = 2; k <= 5 && open; k++) if (!skyFree(r.x, r.y + k, r.z)) open = false
       if (open && g.isWater(r.x, r.y - 2, r.z)) open = false
-      if (open) pearls.push(r)
+      if (open) {
+        let safeAdjFloors = 0
+        for (const [pdx, pdz] of DIRS) {
+          if (isFullFloor(blockAt(r.x + pdx, r.y - 1, r.z + pdz)) || isFullFloor(blockAt(r.x + pdx, r.y - 2, r.z + pdz))) {
+            safeAdjFloors++
+          }
+        }
+        if (safeAdjFloors >= 3) pearls.push(r)
+      }
     }
     for (const [dx, dz] of DIRS) {
       const nx = r.x + dx; const nz = r.z + dz
@@ -339,7 +347,7 @@ function planEntries (blockAt, R, from, opts = {}) {
         if (dy < -2 || dy > 4) continue
         const dx = tc.x - rc.x; const dz = tc.z - rc.z
         const mh = Math.abs(dx) + Math.abs(dz)
-        if (mh < 2 || mh > 11) continue
+        if (mh < 2 || mh > 15) continue
         // Build L-path of floor cells from rc to tc (allowing existing solid column tops along the path)
         const steps = []
         let placedCount = 0
@@ -356,7 +364,7 @@ function planEntries (blockAt, R, from, opts = {}) {
           if (!floorAlreadySolid) placedCount++
           steps.push({ x: cx, y: cy, z: cz, alreadySolid: floorAlreadySolid })
         }
-        if (clear && steps.length >= 1 && placedCount >= 1 && placedCount <= 8 && Math.abs(cy - tc.y) <= 1) {
+        if (clear && steps.length >= 1 && placedCount >= 1 && placedCount <= 10 && Math.abs(cy - tc.y) <= 1) {
           const walkD = Math.hypot(rc.x - from.x, rc.z - from.z)
           const standD = distToStand(tc)
           bridges.push({ start: rc, end: tc, steps, placedCount, cost: placedCount * 1.8 + (steps.length - placedCount) * 0.5 + Math.max(0, dy) * 1.5 + walkD * 0.15 + standD * 0.25 })
@@ -648,7 +656,7 @@ class Brain {
       } catch { return false }
     }
 
-    const deckLevelBridgeFirst = Math.abs(stand.y - me.y) <= 3 && plan.bridges && plan.bridges.length && Math.abs(plan.bridges[0].start.y - me.y) <= 2 && (plan.bridges[0].placedCount || plan.bridges[0].steps.length) <= 4
+    const deckLevelBridgeFirst = Math.abs(stand.y - me.y) <= 3 && plan.bridges && plan.bridges.length && Math.abs(plan.bridges[0].start.y - me.y) <= 2 && (plan.bridges[0].placedCount || plan.bridges[0].steps.length) <= 8
     if (deckLevelBridgeFirst) {
       for (const b of plan.bridges.slice(0, 2)) {
         if (await tryBridge(b)) return true

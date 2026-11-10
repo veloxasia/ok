@@ -128,6 +128,12 @@ async function startFleet (config, createBuilderBot, logger) {
   const names = workerNames(config)
   const stateDir = path.resolve(path.join(__dirname, '..', '..'), config.paths.stateDir)
   const hub = new Hub({ logger, jobFile: path.join(stateDir, 'fleet-job.json'), resume: Boolean(config.server.resumeOnStart), loginGapMs: Number(config.fleet?.joinDelayMs ?? 6000), deadAfterMs: Number(config.fleet?.deadAfterMs ?? 90_000) })
+  const preferredSchem = config.control?.defaultSchematic ? path.basename(String(config.control.defaultSchematic)) : null
+  if (hub.job && preferredSchem && path.basename(String(hub.job.file || '')) !== preferredSchem) {
+    logger.info(`ignoring old saved job ${hub.job.file} because selected schematic is ${preferredSchem}`)
+    hub.job = null
+    hub.saveJob()
+  }
   const totalRamMb = detectContainerRamMb()
   const cpuCount = os.cpus()?.length || 1
   const fairShareMb = Math.floor(totalRamMb * 0.8 / Math.max(1, names.length + 1))

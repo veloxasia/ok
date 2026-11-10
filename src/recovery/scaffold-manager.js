@@ -29,11 +29,9 @@ class ScaffoldManager {
     map.set = function (k, v) {
       const res = origSet(k, v)
       try {
-        if (!self.bot?.builder?.isSweeper) {
-          const coord = self.bot?.builder?.fleet?.coord
-          if (coord?.addTempBlock && v && typeof v.x === 'number') {
-            coord.addTempBlock(v, self.bot?.username || '')
-          }
+        const coord = self.bot?.builder?.fleet?.coord
+        if (coord?.addTempBlock && v && typeof v.x === 'number') {
+          coord.addTempBlock(v, self.bot?.username || '')
         }
       } catch {}
       return res
@@ -671,6 +669,12 @@ class ScaffoldManager {
       const underPos = new Vec3(Math.floor(p.x), Math.floor(p.y - 0.05), Math.floor(p.z))
       const rec = this.created.get(key(underPos))
       if (!rec || rec.isAccessStep || rec.isTempLadder) return
+      if (this.bot?.builder?.placer?.fluidBeside?.(underPos, true)) {
+        rec.isAccessStep = true
+        rec.isCatwalk = true
+        this.created.set(key(underPos), rec)
+        return
+      }
       const below1 = this.world.blockAt(underPos.offset(0, -1, 0))
       const below2 = this.world.blockAt(underPos.offset(0, -2, 0))
       const hasSolidBelow = (below1 && isFullTop(below1) && !isAirLike(below1) && below1.name !== 'lava') ||
@@ -735,7 +739,7 @@ class ScaffoldManager {
       if (!this.created.size || !this.bot.entity) return 0
       const p = this.bot.entity.position
       const list = this.getCreated()
-        .filter(c => { const b = this.world.blockAt(c); if (!b || isAirLike(b) || (b.name !== this.itemName && b.name !== 'ladder')) { this.created.delete(key(c)); return false } return c.distanceTo(p) <= 4.3 && !(Math.floor(p.x) === c.x && Math.floor(p.z) === c.z && Math.floor(p.y - 0.05) === c.y) })
+        .filter(c => { const b = this.world.blockAt(c); if (!b || isAirLike(b) || (b.name !== this.itemName && b.name !== 'ladder')) { this.created.delete(key(c)); return false } if (this.bot?.builder?.placer?.fluidBeside?.(c, true)) return false; return c.distanceTo(p) <= 4.3 && !(Math.floor(p.x) === c.x && Math.floor(p.z) === c.z && Math.floor(p.y - 0.05) === c.y) })
         .sort((a, b) => b.y - a.y)
       if (!list.length) break
       const target = list[0]

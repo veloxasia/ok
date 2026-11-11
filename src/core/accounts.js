@@ -6,15 +6,29 @@
 //               Tokens expire (about a day), so this is for short use; "microsoft" is the better choice for long builds.
 //   offline   : cracked / offline-mode servers. Only a username.
 const path = require('path')
+const { resolveEffectiveProxy, httpsGetJsonViaProxy } = require('./proxy')
 
 const PROFILE_URL = 'https://api.minecraftservices.com/minecraft/profile'
 
 function dashless (uuid) { return String(uuid || '').replace(/-/g, '').toLowerCase() }
 
 // asks Mojang who owns this token (also used by the GUI "Verify" button)
-async function verifySession (accessToken, timeoutMs = 10000) {
+async function verifySession (accessToken, timeoutMs = 10000, proxyInput = null) {
   const token = String(accessToken || '').trim().replace(/^Bearer\s+/i, '')
   if (!token) throw new Error('empty token')
+  if (proxyInput) {
+    try {
+      const r = await httpsGetJsonViaProxy(PROFILE_URL, { Authorization: `Bearer ${token}` }, proxyInput, timeoutMs)
+      if (r.status === 401 || r.status === 403) throw new Error('token rejected by Minecraft services (expired or wrong token)')
+      if (r.status === 404) throw new Error('this account has no Minecraft Java profile')
+      if (r.status >= 200 && r.status < 300 && r.body?.name && r.body?.id) {
+        return { name: r.body.name, id: dashless(r.body.id), token }
+      }
+    } catch (err) {
+      if (/rejected by Minecraft|no Minecraft Java profile/i.test(err.message)) throw err
+      // Fall back to direct lookup if proxy HTTPS check failed during token verification
+    }
+  }
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), timeoutMs)
   try {
@@ -30,6 +44,7 @@ async function verifySession (accessToken, timeoutMs = 10000) {
 // options merged into mineflayer.createBot() for this account
 async function authOptions (account, config, stateDir) {
   const mode = account.mode || 'offline'
+  const proxy = resolveEffectiveProxy(config, account)
   if (mode === 'offline') return { username: account.username, auth: 'offline' }
   if (mode === 'microsoft') {
     const folder = path.join(stateDir, 'auth', String(account.username || account.label || 'account').replace(/[^\w.-]/g, '_'))
@@ -41,7 +56,7 @@ async function authOptions (account, config, stateDir) {
     }
   }
   if (mode === 'session') {
-    const who = await verifySession(account.accessToken)
+    const who = await verifySession(account.accessToken, 10000, proxy)
     if (account.username && who.name.toLowerCase() !== String(account.username).toLowerCase()) {
       throw new Error(`token belongs to ${who.name}, but the account is listed as ${account.username}`)
     }

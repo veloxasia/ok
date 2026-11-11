@@ -1511,7 +1511,18 @@ class Placer {
         lastReason = `reference cell ${key(R)} gives no walkable aim candidates for ${task.name}@${key(task.world)}`
         continue
       }
-      if (this.hasSolidNeighbor(R, task.world) && hasReachableStandFor(R)) {
+      // Under-deck hang support FIRST when R is at the same Y as task.world (e.g. L13 oak_leaves at y=-47)
+      // and R_up = R.offset(0, 1, 0) is already a solid block (e.g. L14 cobblestone at y=-46) while the bot is on the upper deck
+      // or R has no floor/horizontal solid neighbor. Calling placeTempBlock(R) first when R only has R_up forces the bot to look
+      // for a lower-deck stand below R_up (stalling for 16s in "providing a reference block (support)"), whereas hanging R under R_up
+      // from the upper deck succeeds in 250ms in-place!
+      const rOnlyCeiling = !isSolid(this.world.blockAt(R.offset(0, -1, 0))) &&
+        !isSolid(this.world.blockAt(R.offset(1, 0, 0))) &&
+        !isSolid(this.world.blockAt(R.offset(-1, 0, 0))) &&
+        !isSolid(this.world.blockAt(R.offset(0, 0, 1))) &&
+        !isSolid(this.world.blockAt(R.offset(0, 0, -1)))
+      const botOnUpperDeck = (this.bot?.entity?.position?.y ?? -999) >= R.y + 1.5
+      if (!rOnlyCeiling && !botOnUpperDeck && this.hasSolidNeighbor(R, task.world) && hasReachableStandFor(R)) {
         try {
           await this.placeTempBlock(R, { allowScaffold: false, allowEdgeShift: true })
           this.logger.info(`SUPPORT: placed temporary reference block at ${key(R)} for ${task.name}@${key(task.world)}`)
@@ -1565,6 +1576,17 @@ class Placer {
             } catch (err) { lastReason = err.message }
           }
         }
+      }
+      if ((rOnlyCeiling || botOnUpperDeck) && this.hasSolidNeighbor(R, task.world) && hasReachableStandFor(R)) {
+        try {
+          await this.placeTempBlock(R, { allowScaffold: false, allowEdgeShift: true })
+          this.logger.info(`SUPPORT: placed temporary reference block at ${key(R)} for ${task.name}@${key(task.world)}`)
+          return await finishSupport([R])
+        } catch (err) { lastReason = err.message }
+      }
+      if (R.y === task.world.y && this.scaffold?._placeBlockOnFloor) {
+        const rUp = R.offset(0, 1, 0)
+        const rUpBlock = this.world.blockAt(rUp)
         // Upper-deck 1-2 step horizontal bridge + under-deck hang (for 3x3 center-chamber L13 oak_leaves where rUp at y=-46 is air):
         if ((!rUpBlock || isAirLike(rUpBlock)) &&
             isBodyFree(this.world.blockAt(rUp.offset(0, 1, 0))) &&

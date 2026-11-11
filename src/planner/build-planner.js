@@ -1767,23 +1767,25 @@ class BuildPlanner {
             }
           }
           if (lBaseGenSet.size >= 24) {
-            const baseFloorGrp = this.orderGroups.get(baseFloorOrder)
-            if (baseFloorGrp) baseFloorGrp.hasDependentCapOrder = true
+            const capLeafTasks = []
             for (const t of this.tasks.values()) {
               if (t.layer !== lCap || t.kind !== "block" || !t.info?.waterlogged) continue
               if (hasSolidFloorAt(t.world.x, t.world.y - 1, t.world.z)) continue
-              this.moveTaskToOrder(t, capLeavesOrder)
+              this.moveTaskToOrder(t, baseFloorOrder)
               const twl = this.tasks.get(`${t.key}#w`)
-              if (twl) this.moveTaskToOrder(twl, capLeavesOrder)
+              if (twl) this.moveTaskToOrder(twl, baseFloorOrder)
               const altKeys = []
               for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
                 const adjK = `${t.world.x + dx},${t.world.y + 1},${t.world.z + dz}`
                 if (lBaseGenSet.has(adjK)) altKeys.push(adjK)
               }
               if (altKeys.length) t.altBridgeAnchorKeys = altKeys
+              capLeafTasks.push(t)
             }
+            const lBaseLavaTasks = []
             for (const ft of this.tasks.values()) {
               if (ft.layer !== lBase || ft.kind !== "fluid" || ft.name !== "lava") continue
+              this.moveTaskToOrder(ft, baseFloorOrder)
               for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
                 const adjK = `${ft.world.x + dx},${ft.world.y},${ft.world.z + dz}`
                 const oppK = `${ft.world.x - dx},${ft.world.y},${ft.world.z - dz}`
@@ -1794,6 +1796,101 @@ class BuildPlanner {
                   if (adjT?.info?.waterlogged) break
                 }
               }
+              lBaseLavaTasks.push(ft)
+            }
+
+            // Build 64 self-contained module clusters at baseFloorOrder (56.08) so each bot builds:
+            //   1) That module's L14 30-block ring (+ #w)
+            //   2) Immediately hangs that module's 5 L13 shaft-cap leaves (+ #w) while standing on that L14 ring
+            //   3) Immediately pours that module's 6 L14 lava sources to seal that module before moving to the next module!
+            const moduleCenters = anchorGroups.map((grp, cid) => {
+              const pts = []
+              for (const ga of grp) {
+                pts.push({ x: ga.x, z: ga.z })
+                for (const p of ga.partners) pts.push({ x: p.x, z: p.z })
+              }
+              const cx = pts.reduce((s, p) => s + p.x, 0) / Math.max(1, pts.length)
+              const cz = pts.reduce((s, p) => s + p.z, 0) / Math.max(1, pts.length)
+              return { cid, cx, cz, grp, pts }
+            })
+            const nearestModCid = (wx, wz) => {
+              let bestCid = 0; let bestD = Infinity
+              for (const mc of moduleCenters) {
+                const d = Math.hypot(wx - mc.cx, wz - mc.cz)
+                if (d < bestD) { bestD = d; bestCid = mc.cid }
+              }
+              return bestCid
+            }
+            const leavesByCid = new Map()
+            const lavaByCid = new Map()
+            for (let cid = 0; cid < anchorGroups.length; cid++) {
+              leavesByCid.set(cid, [])
+              lavaByCid.set(cid, [])
+            }
+            for (const lt of capLeafTasks) leavesByCid.get(nearestModCid(lt.world.x, lt.world.z)).push(lt)
+            for (const ft of lBaseLavaTasks) lavaByCid.get(nearestModCid(ft.world.x, ft.world.z)).push(ft)
+
+            const baseClusterLists = []
+            const allBaseClusterTasks = []
+            let baseSeqCounter = 1
+            for (let cid = 0; cid < anchorGroups.length; cid++) {
+              const grpAnchors = anchorGroups[cid]
+              const cSeq = []
+              const ringBlockKeys = []
+              for (const ga of grpAnchors) {
+                const cells = [{ x: ga.x, z: ga.z }, ...ga.partners.map(p => ({ x: p.x, z: p.z }))]
+                for (const c of cells) {
+                  const bt = this.tasks.get(`${c.x},${baseY0 - 1},${c.z}`)
+                  if (bt && bt.kind === "block" && bt.layer === lBase) {
+                    cSeq.push(bt)
+                    ringBlockKeys.push(bt.key)
+                    const bwl = this.tasks.get(`${bt.key}#w`)
+                    if (bwl) cSeq.push(bwl)
+                  }
+                }
+              }
+              const lastRingKey = ringBlockKeys.length ? ringBlockKeys[ringBlockKeys.length - 1] : null
+              const modLeaves = leavesByCid.get(cid) || []
+              // Sort module leaves so peripheral leaves (adjacent to L14 ring blocks) come before center leaf
+              modLeaves.sort((a, b) => ((b.altBridgeAnchorKeys?.length || 0) - (a.altBridgeAnchorKeys?.length || 0)) || (a.world.x - b.world.x) || (a.world.z - b.world.z))
+              const leafDoneKeys = []
+              for (const lt of modLeaves) {
+                if (lastRingKey) lt.verticalPrevKey = lastRingKey
+                cSeq.push(lt)
+                const lwl = this.tasks.get(`${lt.key}#w`)
+                if (lwl) {
+                  lwl.verticalPrevKey = lt.key
+                  cSeq.push(lwl)
+                  leafDoneKeys.push(lwl.key)
+                } else {
+                  leafDoneKeys.push(lt.key)
+                }
+              }
+              const lastLeafKey = leafDoneKeys.length ? leafDoneKeys[leafDoneKeys.length - 1] : lastRingKey
+              const modLava = lavaByCid.get(cid) || []
+              modLava.sort((a, b) => (a.world.x - b.world.x) || (a.world.z - b.world.z))
+              for (const ft of modLava) {
+                if (lastLeafKey) ft.verticalPrevKey = lastLeafKey
+                cSeq.push(ft)
+              }
+              if (cSeq.length > 0) {
+                const rootK = cSeq[0].key
+                for (let idx = 0; idx < cSeq.length; idx++) {
+                  const ct = cSeq[idx]
+                  ct.verticalClusterId = cid
+                  ct.verticalClusterRootKey = rootK
+                  ct.verticalClusterSeq = baseSeqCounter++
+                  allBaseClusterTasks.push(ct)
+                }
+                baseClusterLists.push({ cid, tasks: cSeq, ptr: 0 })
+              }
+            }
+            const baseFloorGrp = this.orderGroups.get(baseFloorOrder)
+            if (baseFloorGrp && baseClusterLists.length > 0) {
+              baseFloorGrp.isModuleClusterBase = true
+              baseFloorGrp.seqList = allBaseClusterTasks
+              baseFloorGrp.seqPtr = 0
+              baseFloorGrp.clusters = baseClusterLists
             }
           }
         }

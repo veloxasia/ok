@@ -5,7 +5,7 @@ const fs = require('fs')
 const path = require('path')
 
 const DEFAULTS = {
-  server: { host: '', port: 25565, version: '', autoReconnect: true, reconnectDelayMs: 15000, resumeOnStart: false },
+  server: { host: '', port: 25565, version: '', proxy: '', proxyType: 'auto', autoReconnect: true, reconnectDelayMs: 15000, resumeOnStart: false },
   control: { allowedUsers: [], chatPrefix: '!', chatCommands: false, announceInChat: false, defaultSchematic: '', defaultRotation: 0 },
   mode: 'donut', // 'donut' = real server (shop, strict rules) | 'test' = own/Aternos server (/give, cracked)
   serverProfiles: {}, // remembered address per mode: { test: {host, port}, donut: {host, port} }

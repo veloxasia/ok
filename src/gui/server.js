@@ -10,6 +10,7 @@ const crypto = require('crypto')
 const { spawn } = require('child_process')
 const { DEFAULTS, deepMerge, loadConfig } = require('../core/config')
 const { verifySession } = require('../core/accounts')
+const { testProxyConnection } = require('../core/proxy')
 const { buildZipBuffer, collectFolderEntries } = require('../util/zip')
 let statePaths = null
 try { statePaths = require('../state/paths') } catch {}
@@ -101,6 +102,7 @@ function state () {
     mode: a.mode || 'offline',
     username: a.username || '',
     role: a.role || 'auto',
+    proxy: a.proxy || '',
     hasToken: Boolean(a.accessToken),
     hasPassword: Boolean(a.password)
   }))
@@ -153,6 +155,7 @@ function save (body) {
     const mode = ['microsoft', 'session', 'offline'].includes(a.mode) ? a.mode : 'offline'
     const out = { enabled: a.enabled !== false, mode, username: String(a.username || '').trim() }
     if (a.role === 'sweeper' || a.role === 'builder') out.role = a.role
+    if (a.proxy != null && String(a.proxy).trim()) out.proxy = String(a.proxy).trim()
     if (mode === 'offline') { const pw = a.password ? String(a.password) : prev.password; if (pw) out.password = pw }
     if (mode === 'session') out.accessToken = a.accessToken ? String(a.accessToken).trim().replace(/^Bearer\s+/i, '') : prev.accessToken || ''
     return out
@@ -411,8 +414,12 @@ function start (port = 0, host = process.env.MHB_GUI_HOST || '0.0.0.0') {
       if (url.pathname === '/api/verify') {
         let tokenValue = body.accessToken
         if (!tokenValue && Number.isInteger(body.index)) { const f = readJson(accountsFile, { accounts: [] }); tokenValue = (f.accounts || [])[body.index]?.accessToken }
-        const who = await verifySession(tokenValue)
+        const who = await verifySession(tokenValue, 10000, body.proxy || null)
         return json(200, { name: who.name, id: who.id })
+      }
+      if (url.pathname === '/api/test-proxy') {
+        const res = await testProxyConnection(body.proxy, body.proxyType || 'auto', body.host || '', body.port || 25565)
+        return json(200, res)
       }
       if (url.pathname === '/api/start-bots') return json(200, { ok: startBots(Boolean(body.fresh)) })
       if (url.pathname === '/api/stop-bots') return json(200, { ok: stopBots() })

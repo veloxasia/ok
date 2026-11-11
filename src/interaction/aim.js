@@ -532,7 +532,9 @@ class AimSolver {
         }
       }
       if (!res && !this.isHazard(cell) && !this.isHazard(cell.offset(0, -1, 0)) && !this.noScaffold?.(cell) && !this.noScaffold?.(cell.offset(0, -1, 0))) {
-        for (let h = 0; h <= this.maxTower; h++) {
+        const botFeetY = this.bot?.entity?.position ? Math.floor(this.bot.entity.position.y) : null
+        const maxTowerH = (botFeetY != null && botFeetY >= cell.y - 1) ? Math.min(this.maxTower, 3) : this.maxTower
+        for (let h = 0; h <= maxTowerH; h++) {
           const c = cell.offset(0, -1 - h, 0)
           if (this.isHazard(c) || this.isHazard(c.offset(0, 1, 0)) || this.noScaffold?.(c) || this.noScaffold?.(c.offset(0, 1, 0))) break
           const b = this.world.blockAt(c)

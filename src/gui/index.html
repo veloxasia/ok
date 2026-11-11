@@ -50,16 +50,26 @@ table{width:100%;border-collapse:collapse}td,th{padding:4px 6px;text-align:left;
  <button class="mode on" id="m-donut" type="button"><b>DonutSMP (real server)</b><span>Bots buy everything from /shop and add missing items to it. Strict human rules.</span></button>
 </div>
 
-<section><h2>1 · Server</h2>
+<section><h2>1 · Server &amp; Proxy Tunnel</h2>
 <div class="row">
  <label style="flex:1">Server address<input id="host" placeholder="play.example.net"></label>
  <label>Port<input id="port" type="number" style="width:90px"></label>
+</div>
+<div class="row">
+ <label style="flex:1" title="Supports host:port:username:password (e.g. pg.stealthtunnel.net:6060:o0i6f039le1bozi:62B358D4-5ED7-E14C-A931-1D1381A738E6), socks5://user:pass@host:port, or http://user:pass@host:port">Proxy (optional — <code>host:port:username:password</code>)<input id="proxy" placeholder="pg.stealthtunnel.net:6060:username:password"></label>
+ <label>Proxy type<select id="proxyType" style="width:170px">
+  <option value="auto">Auto (SOCKS5 / HTTP)</option>
+  <option value="socks5">SOCKS5</option>
+  <option value="http">HTTP CONNECT</option>
+  <option value="off">Off (Direct)</option>
+ </select></label>
+ <button type="button" class="sec" id="testProxyBtn" title="Test tunneling through this proxy to the server">🔌 Test Proxy</button>
 </div>
 <p class="hint" id="modeHint"></p>
 </section>
 
 <section><h2>2 · Accounts <span class="st">(supports any custom bot count 1..N — set Role to Auto, Builder, or Sweeper)</span></h2>
-<table id="accounts"><thead><tr><th>On</th><th>In-game name</th><th>Role</th><th>Login</th><th id="secHead"></th><th></th></tr></thead><tbody></tbody></table>
+<table id="accounts"><thead><tr><th>On</th><th>In-game name</th><th>Role</th><th>Login</th><th id="secHead"></th><th>Proxy override (optional)</th><th></th></tr></thead><tbody></tbody></table>
 <div class="row" style="margin-top:8px"><button class="sec" id="addAcc">+ Add account</button></div>
 <p class="hint"><b>Custom Bot Count &amp; Roles</b>: Add and tick any custom number of bots (1, 2, 3, 4, 5, 6, 7, 8, 10+). Set each bot's <b>Role</b> to <b>Builder</b> (all bots build), <b>Sweeper</b> (dedicated janitor), or <b>Auto</b> (all build when 1–4 bots; last bot acts as Sweeper when 5+ bots). If any bot disconnects, online bots automatically take over its tasks.</p>
 </section>
@@ -152,10 +162,11 @@ function updateStats(ds,sys){
   $('sysBadge').textContent=`${sys.cpus} vCPU · ${sys.totalRamGb} GB RAM${sys.isRender?' · Render Cloud':''}`
  }
 }
-function stash(){prof[mode]={host:$('host').value.trim(),port:Number($('port').value)||25565}}
+function stash(){prof[mode]={host:$('host').value.trim(),port:Number($('port').value)||25565,proxy:$('proxy').value.trim(),proxyType:$('proxyType').value||'auto'}}
 function setMode(m,keep){if(!keep)stash();mode=m;document.body.className=m
  $('m-test').classList.toggle('on',m==='test');$('m-donut').classList.toggle('on',m==='donut')
  $('host').value=prof[m].host||'';$('port').value=prof[m].port||25565;$('host').placeholder=m==='test'?'yourserver.aternos.me':'play.example.net'
+ if(prof[m].proxy!==undefined)$('proxy').value=prof[m].proxy||'';if(prof[m].proxyType)$('proxyType').value=prof[m].proxyType||'auto'
  $('modeHint').textContent=HINT[m];drawAccounts()}
 $('m-test').onclick=()=>setMode('test');$('m-donut').onclick=()=>setMode('donut')
 function drawAccounts(){const tb=$('accounts').querySelector('tbody');tb.innerHTML='';$('secHead').textContent='Token / password'
@@ -165,8 +176,9 @@ function drawAccounts(){const tb=$('accounts').querySelector('tbody');tb.innerHT
   <td><select data-k=role><option value=auto>Auto</option><option value=builder>Builder</option><option value=sweeper>Sweeper (Janitor)</option></select></td>
   <td><select data-k=mode><option value=microsoft>Microsoft</option><option value=session>Session token</option><option value=offline>Cracked</option></select></td>
   <td style="white-space:nowrap"><input data-k=secret type=password style="width:140px"> <button class=sec data-act=verify>Verify</button></td>
+  <td><input data-k=proxy placeholder="use server proxy" style="width:155px" title="Optional per-bot proxy (host:port:user:pass). Leave blank to use the Server Proxy above."></td>
   <td><button class=sec data-act=del title="Remove">✕</button></td>`
-  tr.querySelector('[data-k=mode]').value=a.mode;tr.querySelector('[data-k=username]').value=a.username;tr.querySelector('[data-k=role]').value=a.role||'auto'
+  tr.querySelector('[data-k=mode]').value=a.mode;tr.querySelector('[data-k=username]').value=a.username;tr.querySelector('[data-k=role]').value=a.role||'auto';tr.querySelector('[data-k=proxy]').value=a.proxy||''
   const sin=tr.querySelector('[data-k=secret]'),vb=tr.querySelector('[data-act=verify]')
   const sync=()=>{sin.style.visibility=a.mode==='microsoft'?'hidden':'visible';vb.style.display=a.mode==='session'?'':'none'
    sin.placeholder=a.mode==='offline'?(a.hasPassword?'password saved':'password (optional)'):(a.hasToken?'token saved':'paste token')
@@ -175,12 +187,13 @@ function drawAccounts(){const tb=$('accounts').querySelector('tbody');tb.innerHT
    if(k==='secret'){if(a.mode==='offline')a.password=e.target.value;else a.accessToken=e.target.value}
    else{a[k]=e.target.type==='checkbox'?e.target.checked:e.target.value;if(k==='mode')sync()}})
   tr.addEventListener('click',async e=>{const act=e.target.dataset.act;if(act==='del'){accounts.splice(i,1);drawAccounts()}
-   if(act==='verify'){try{const j=await api('/api/verify',a.accessToken?{accessToken:a.accessToken}:{index:i});a.username=j.name;msg('Token belongs to '+j.name);drawAccounts()}catch(x){msg('Verify failed: '+x.message,1)}}})
+   if(act==='verify'){try{const p=a.proxy||$('proxy').value.trim();const j=await api('/api/verify',a.accessToken?{accessToken:a.accessToken,proxy:p}:{index:i,proxy:p});a.username=j.name;msg('Token belongs to '+j.name);drawAccounts()}catch(x){msg('Verify failed: '+x.message,1)}}})
   tb.appendChild(tr)})}
-$('addAcc').onclick=()=>{accounts.push({enabled:true,mode:mode==='test'?'offline':'microsoft',role:'auto',username:'',hasToken:false});drawAccounts()}
+$('addAcc').onclick=()=>{accounts.push({enabled:true,mode:mode==='test'?'offline':'microsoft',role:'auto',proxy:'',username:'',hasToken:false});drawAccounts()}
 function fill(){const s=S.settings
- prof={test:{host:'',port:25565},donut:{host:'',port:25565},...(s.serverProfiles||{})}
- const m=s.mode==='test'?'test':'donut';prof[m]={host:s.server.host||'',port:s.server.port||25565}
+ prof={test:{host:'',port:25565,proxy:'',proxyType:'auto'},donut:{host:'',port:25565,proxy:'',proxyType:'auto'},...(s.serverProfiles||{})}
+ const m=s.mode==='test'?'test':'donut';prof[m]={host:s.server.host||'',port:s.server.port||25565,proxy:s.server.proxy||prof[m]?.proxy||'',proxyType:s.server.proxyType||prof[m]?.proxyType||'auto'}
+ $('proxy').value=s.server.proxy||'';$('proxyType').value=s.server.proxyType||'auto'
  $('version').value=s.server.version||'';$('autoReconnect').checked=s.server.autoReconnect!==false;$('minHealth').value=s.safety.minimumHealth;$('pace').value=s.human.pace||'max';$('myName').value=(s.control.allowedUsers||[]).join(', ')
  $('stacks').value=s.shop.stacksPerVisit;const tools=(s.materials.toolItems||[]).join(', ');$('tools').value=tools;$('toolsT').value=tools
  $('food').value=$('foodT').value=s.materials.foodItem||'';$('allowPearls').checked=$('allowPearlsT').checked=s.human.allowPearls!==false
@@ -192,13 +205,13 @@ function fill(){const s=S.settings
 $('schem').onchange=()=>{if(S?.settings?.control)S.settings.control.defaultSchematic=$('schem').value;if(S?.saved&&S.saved.file!==$('schem').value){S.saved=null;showSaved(null,false)}}
 const list=v=>v.split(',').map(x=>x.trim()).filter(Boolean)
 function collect(){stash();const d=mode==='donut',h=prof[mode]
- return{mode,settings:{serverProfiles:prof,server:{host:h.host,port:h.port,version:$('version').value.trim(),autoReconnect:$('autoReconnect').checked},
+ return{mode,settings:{serverProfiles:prof,server:{host:h.host,port:h.port,proxy:$('proxy').value.trim(),proxyType:$('proxyType').value||'auto',version:$('version').value.trim(),autoReconnect:$('autoReconnect').checked},
   shop:{stacksPerVisit:Number($('stacks').value)||3},
   materials:{toolItems:list(d?$('tools').value:$('toolsT').value),foodItem:(d?$('food').value:$('foodT').value).trim()||'cooked_beef'},
   human:{pace:$('pace').value,allowPearls:(d?$('allowPearls'):$('allowPearlsT')).checked},
   teleport:{homes:$('tpHomes').checked,tpa:$('tpTpa').checked},safety:{minimumHealth:Number($('minHealth').value)||8},
   control:{defaultSchematic:$('schem').value,allowedUsers:list($('myName').value),chatCommands:list($('myName').value).length>0}},
-  accounts:accounts.map(a=>({enabled:a.enabled,mode:a.mode,role:a.role||'auto',username:a.username,accessToken:a.mode==='session'?a.accessToken:undefined,password:a.mode==='offline'?a.password:undefined}))}}
+  accounts:accounts.map(a=>({enabled:a.enabled,mode:a.mode,role:a.role||'auto',proxy:(a.proxy||'').trim(),username:a.username,accessToken:a.mode==='session'?a.accessToken:undefined,password:a.mode==='offline'?a.password:undefined}))}}
 function showSaved(j,allowSelectSchem=false){const b=$('startBots');b.title=j?`Saved: ${j.file} at ${j.origin?.x}, ${j.origin?.y}, ${j.origin?.z}`:'No saved build yet: starts the bots and waits for Start build';$('savedInfo').textContent=j?`Last session: ${j.file} at ${j.origin?.x}, ${j.origin?.y}, ${j.origin?.z}${j.startLayer!=null?` (continue from layer ${j.startLayer})`:''}`:'No saved session.'
  if(j&&j.origin){
   if($('ox').value===''&&j.origin.x!=null)$('ox').value=j.origin.x
@@ -210,6 +223,15 @@ function showSaved(j,allowSelectSchem=false){const b=$('startBots');b.title=j?`S
  }}
 async function save(){try{if(!$('host').value.trim())throw new Error('Enter the server address first');const chosenSchem=$('schem').value;await api('/api/save',collect());S=await api('/api/state');fill();if(chosenSchem&&[...$('schem').options].some(o=>o.value===chosenSchem))$('schem').value=chosenSchem;showSaved(S.saved,false);msg('Saved');return true}catch(e){msg(e.message,1);return false}}
 $('save').onclick=save
+$('testProxyBtn').onclick=async()=>{
+ const p=$('proxy').value.trim();const pt=$('proxyType').value||'auto'
+ if(!p||pt==='off')return msg('Enter a proxy (host:port:username:password) and select SOCKS5 / HTTP / Auto first',1)
+ msg('Testing proxy connection...')
+ try{
+  const j=await api('/api/test-proxy',{proxy:p,proxyType:pt,host:$('host').value.trim(),port:Number($('port').value)||25565})
+  msg(`Proxy OK (${j.protocol}) — Exit: ${j.exitIp} -> ${j.target} in ${j.latencyMs}ms`)
+ }catch(e){msg('Proxy test failed: '+e.message,1)}
+}
 function setRunning(r){running=r;$('dot').className='dot'+(r?' on':'');$('runtxt').textContent=r?'Bots running':'Bots stopped';for(const id of ['startBots','startFresh'])$(id).style.display=r?'none':'';$('stopBots').style.display=r?'':'none'
  for(const id of ['build','continueBuild','pause','resume','stopBuild','selfTestBtn'])$(id).disabled=!r}
 const begin=async fresh=>{if(await save()){const j=await api('/api/start-bots',{fresh});msg(j.ok?'Bots starting':'Bots already running',!j.ok)}}

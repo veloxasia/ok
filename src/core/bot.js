@@ -7,6 +7,7 @@ const { RecoveryManager } = require('../recovery/recovery-manager')
 const { NavigationController } = require('../navigation/controller')
 const { WorldModel } = require('./world-model')
 const { waitFor } = require('../util/async')
+const { resolveEffectiveProxy, createMineflayerProxyOptions } = require('./proxy')
 
 function parseCommandArgs (input) {
   const parts = []
@@ -22,6 +23,10 @@ function createBuilderBot (config, fleet = null, authOpts = null) {
   const logger = new Logger(fleet ? fleet.id : 'bot')
   const isLeader = !fleet || fleet.index === 0
   const chosenVersion = config.server.version || config.server._detectedVersion || ''
+  const effectiveProxy = resolveEffectiveProxy(config, config.account)
+  const proxyOpts = effectiveProxy
+    ? createMineflayerProxyOptions(effectiveProxy, config.server.host, Number(config.server.port) || 25565, logger)
+    : {}
   const bot = mineflayer.createBot({
     host: config.server.host,
     port: Number(config.server.port) || 25565,
@@ -30,6 +35,7 @@ function createBuilderBot (config, fleet = null, authOpts = null) {
     ...(chosenVersion ? { version: chosenVersion } : {}),
     auth: 'offline',
     ...(authOpts || {}),
+    ...proxyOpts,
     // a fleet shares one process and one connection budget: a small view distance cuts the chunk traffic a lot
     ...(fleet ? { viewDistance: Number(config.fleet?.viewDistance ?? 8) } : {}),
     checkTimeoutInterval: 60_000,
